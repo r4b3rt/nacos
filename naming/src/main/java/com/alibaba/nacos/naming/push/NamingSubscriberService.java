@@ -30,18 +30,20 @@ public interface NamingSubscriberService {
     
     /**
      * Get all push target subscribers for specified service.
+     * TODO use {@link com.alibaba.nacos.api.naming.pojo.maintainer.SubscriberInfo} replaced return
      *
      * @param namespaceId namespace id
      * @param serviceName service name
-     * @return list of subsribers
+     * @return list of subscribers
      */
     Collection<Subscriber> getSubscribers(String namespaceId, String serviceName);
     
     /**
      * Get all push target subscribers for specified service.
+     * TODO use {@link com.alibaba.nacos.api.naming.pojo.maintainer.SubscriberInfo} replaced return
      *
      * @param service {@link Service}
-     * @return list of subsribers
+     * @return list of subscribers
      */
     Collection<Subscriber> getSubscribers(Service service);
     
@@ -49,10 +51,11 @@ public interface NamingSubscriberService {
      * Fuzzy get subscribers. Only support fuzzy serviceName.
      *
      * <p>Warning: This method cost much performance, use less.
+     * TODO use {@link com.alibaba.nacos.api.naming.pojo.maintainer.SubscriberInfo} replaced return
      *
      * @param namespaceId namespace id
      * @param serviceName fuzzy serviceName
-     * @return list of subsribers
+     * @return list of subscribers
      */
     Collection<Subscriber> getFuzzySubscribers(String namespaceId, String serviceName);
     
@@ -60,9 +63,10 @@ public interface NamingSubscriberService {
      * Fuzzy get subscribers. Only support fuzzy serviceName.
      *
      * <p>Warning: This method cost much performance, use less.
+     * TODO use {@link com.alibaba.nacos.api.naming.pojo.maintainer.SubscriberInfo} replaced return
      *
      * @param service {@link Service}
-     * @return list of subsribers
+     * @return list of subscribers
      */
     Collection<Subscriber> getFuzzySubscribers(Service service);
 }

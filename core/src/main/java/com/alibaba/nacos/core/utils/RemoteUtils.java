@@ -16,7 +16,7 @@
 
 package com.alibaba.nacos.core.utils;
 
-import com.alibaba.nacos.common.utils.NumberUtil;
+import com.alibaba.nacos.common.utils.NumberUtils;
 
 /**
  * util of remote.
@@ -39,13 +39,13 @@ public class RemoteUtils {
     private static final int REMOTE_EXECUTOR_QUEUE_SIZE = 1 << 14;
     
     /**
-     * get remote executors thread times of processors,default is 64. see the usage of this method for detail.
+     * get remote executors thread times of processors,default is 16. see the usage of this method for detail.
      *
      * @return times of processors.
      */
     public static int getRemoteExecutorTimesOfProcessors() {
         String timesString = System.getProperty("remote.executor.times.of.processors");
-        if (NumberUtil.isDigits(timesString)) {
+        if (NumberUtils.isDigits(timesString)) {
             int times = Integer.parseInt(timesString);
             return times > 0 ? times : REMOTE_EXECUTOR_TIMES_OF_PROCESSORS;
         } else {
@@ -55,7 +55,7 @@ public class RemoteUtils {
     
     public static int getRemoteExecutorQueueSize() {
         String queueSizeString = System.getProperty("remote.executor.queue.size");
-        if (NumberUtil.isDigits(queueSizeString)) {
+        if (NumberUtils.isDigits(queueSizeString)) {
             int size = Integer.parseInt(queueSizeString);
             return size > 0 ? size : REMOTE_EXECUTOR_QUEUE_SIZE;
         } else {

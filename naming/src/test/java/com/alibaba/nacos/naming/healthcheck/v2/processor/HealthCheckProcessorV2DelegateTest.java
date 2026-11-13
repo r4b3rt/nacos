@@ -17,33 +17,47 @@
 package com.alibaba.nacos.naming.healthcheck.v2.processor;
 
 import com.alibaba.nacos.api.naming.pojo.healthcheck.HealthCheckType;
+import com.alibaba.nacos.api.naming.pojo.healthcheck.impl.Http;
 import com.alibaba.nacos.naming.core.v2.client.impl.IpPortBasedClient;
 import com.alibaba.nacos.naming.core.v2.metadata.ClusterMetadata;
+import com.alibaba.nacos.naming.core.v2.pojo.InstancePublishInfo;
 import com.alibaba.nacos.naming.core.v2.pojo.Service;
 import com.alibaba.nacos.naming.healthcheck.extend.HealthCheckExtendProvider;
+import com.alibaba.nacos.naming.healthcheck.extend.HealthCheckProcessorExtendV2;
 import com.alibaba.nacos.naming.healthcheck.v2.HealthCheckTaskV2;
 import com.alibaba.nacos.sys.env.EnvUtil;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
-import org.mockito.junit.MockitoJUnitRunner;
+import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.mock.env.MockEnvironment;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
-@RunWith(MockitoJUnitRunner.class)
-public class HealthCheckProcessorV2DelegateTest {
+@ExtendWith(MockitoExtension.class)
+class HealthCheckProcessorV2DelegateTest {
     
     @Mock
     private HealthCheckExtendProvider healthCheckExtendProvider;
+    
+    @Mock
+    private HealthCheckProcessorExtendV2 healthCheckProcessorExtendV2;
+    
+    @Mock
+    private HealthCheckCommonV2 healthCheckCommonV2;
     
     @Mock
     private HealthCheckTaskV2 healthCheckTaskV2;
@@ -54,44 +68,179 @@ public class HealthCheckProcessorV2DelegateTest {
     @Mock
     private ClusterMetadata clusterMetadata;
     
+    @Mock
+    private HealthCheckProcessorV2 noneHealthCheckProcessor;
+    
+    @Mock
+    private HealthCheckProcessorV2 activeHealthCheckProcessor;
+    
+    @Mock
+    private IpPortBasedClient client;
+    
+    @Mock
+    private InstancePublishInfo instance;
+    
     private HealthCheckProcessorV2Delegate healthCheckProcessorV2Delegate;
     
-    @Before
-    public void setUp() {
-        healthCheckProcessorV2Delegate = new HealthCheckProcessorV2Delegate(healthCheckExtendProvider);
+    @BeforeEach
+    void setUp() {
+        healthCheckProcessorV2Delegate = new HealthCheckProcessorV2Delegate(
+            healthCheckExtendProvider, healthCheckProcessorExtendV2, healthCheckCommonV2);
         verify(healthCheckExtendProvider).init();
         EnvUtil.setEnvironment(new MockEnvironment());
     }
     
     @Test
-    public void testAddProcessor() throws NoSuchFieldException, IllegalAccessException {
+    void testAddProcessor() throws NoSuchFieldException, IllegalAccessException {
         List<HealthCheckProcessorV2> list = new ArrayList<>();
         list.add(new TcpHealthCheckProcessor(null, null));
+        list.add(activeHealthCheckProcessor);
         healthCheckProcessorV2Delegate.addProcessor(list);
         
-        Class<HealthCheckProcessorV2Delegate> healthCheckProcessorV2DelegateClass = HealthCheckProcessorV2Delegate.class;
-        Field field = healthCheckProcessorV2DelegateClass.getDeclaredField("healthCheckProcessorMap");
+        Class<HealthCheckProcessorV2Delegate> healthCheckProcessorV2DelegateClass =
+            HealthCheckProcessorV2Delegate.class;
+        Field field =
+            healthCheckProcessorV2DelegateClass.getDeclaredField("healthCheckProcessorMap");
         field.setAccessible(true);
-        Map<String, HealthCheckProcessorV2> map = (Map<String, HealthCheckProcessorV2>) field
-                .get(healthCheckProcessorV2Delegate);
+        Map<String, HealthCheckProcessorV2> map =
+            (Map<String, HealthCheckProcessorV2>) field.get(healthCheckProcessorV2Delegate);
         HealthCheckProcessorV2 healthCheckProcessorV2 = map.get(HealthCheckType.TCP.name());
-        Assert.assertNotNull(healthCheckProcessorV2);
+        assertNotNull(healthCheckProcessorV2);
     }
     
     @Test
-    public void testProcess() throws NoSuchFieldException, IllegalAccessException {
+    void testProcess() throws NoSuchFieldException, IllegalAccessException {
         testAddProcessor();
         when(clusterMetadata.getHealthyCheckType()).thenReturn(HealthCheckType.TCP.name());
-        when(healthCheckTaskV2.getClient()).thenReturn(new IpPortBasedClient("127.0.0.1:80#true", true));
+        when(healthCheckTaskV2.getClient())
+            .thenReturn(new IpPortBasedClient("127.0.0.1:80#true", true));
         
         healthCheckProcessorV2Delegate.process(healthCheckTaskV2, service, clusterMetadata);
         
         verify(clusterMetadata).getHealthyCheckType();
-        verify(healthCheckTaskV2).getClient();
+        verify(healthCheckTaskV2, times(2)).getClient();
     }
     
     @Test
-    public void testGetType() {
-        Assert.assertNull(healthCheckProcessorV2Delegate.getType());
+    void testProcessValidAddress() {
+        mockActiveHealthCheck("127.0.0.1");
+        
+        healthCheckProcessorV2Delegate.process(healthCheckTaskV2, service, clusterMetadata);
+        
+        verify(activeHealthCheckProcessor).process(healthCheckTaskV2, service, clusterMetadata);
+        verifyNoInteractions(healthCheckCommonV2);
+    }
+    
+    @Test
+    void testProcessInvalidAddress() {
+        mockActiveHealthCheck("rogue-mysql:3306?allowLoadLocalInfile=true#");
+        
+        healthCheckProcessorV2Delegate.process(healthCheckTaskV2, service, clusterMetadata);
+        
+        verify(activeHealthCheckProcessor, never()).process(healthCheckTaskV2, service,
+            clusterMetadata);
+        verifyNoInteractions(healthCheckCommonV2);
+    }
+    
+    @Test
+    void testProcessInvalidHttpRequestTargetWithoutChangingHealthState() {
+        Http checker = new Http();
+        checker.setPath("http://example.com/health");
+        when(activeHealthCheckProcessor.getType()).thenReturn(HealthCheckType.HTTP.name());
+        when(clusterMetadata.getHealthyCheckType()).thenReturn(HealthCheckType.HTTP.name());
+        when(clusterMetadata.getHealthChecker()).thenReturn(checker);
+        when(healthCheckTaskV2.getClient()).thenReturn(client);
+        when(client.getInstancePublishInfo(service)).thenReturn(instance);
+        when(instance.getIp()).thenReturn("127.0.0.1");
+        healthCheckProcessorV2Delegate.addProcessor(
+            Collections.singletonList(activeHealthCheckProcessor));
+        
+        healthCheckProcessorV2Delegate.process(healthCheckTaskV2, service, clusterMetadata);
+        
+        verify(activeHealthCheckProcessor, never()).process(healthCheckTaskV2, service,
+            clusterMetadata);
+        verifyNoInteractions(healthCheckCommonV2);
+    }
+    
+    @Test
+    void testProcessInvalidHttpHeaderWithoutChangingHealthState() {
+        Http checker = new Http();
+        checker.setPath("/health");
+        checker.setHeaders("X-Test:value\nInjected");
+        when(activeHealthCheckProcessor.getType()).thenReturn(HealthCheckType.HTTP.name());
+        when(clusterMetadata.getHealthyCheckType()).thenReturn(HealthCheckType.HTTP.name());
+        when(clusterMetadata.getHealthChecker()).thenReturn(checker);
+        when(healthCheckTaskV2.getClient()).thenReturn(client);
+        when(client.getInstancePublishInfo(service)).thenReturn(instance);
+        when(instance.getIp()).thenReturn("127.0.0.1");
+        healthCheckProcessorV2Delegate.addProcessor(
+            Collections.singletonList(activeHealthCheckProcessor));
+        
+        healthCheckProcessorV2Delegate.process(healthCheckTaskV2, service, clusterMetadata);
+        
+        verify(activeHealthCheckProcessor, never()).process(healthCheckTaskV2, service,
+            clusterMetadata);
+        verifyNoInteractions(healthCheckCommonV2);
+    }
+    
+    @Test
+    void testProcessValidHttpHealthChecker() {
+        Http checker = new Http();
+        checker.setPath("/health?ready=true");
+        when(activeHealthCheckProcessor.getType()).thenReturn(HealthCheckType.HTTP.name());
+        when(clusterMetadata.getHealthyCheckType()).thenReturn(HealthCheckType.HTTP.name());
+        when(clusterMetadata.getHealthChecker()).thenReturn(checker);
+        when(healthCheckTaskV2.getClient()).thenReturn(client);
+        when(client.getInstancePublishInfo(service)).thenReturn(instance);
+        when(instance.getIp()).thenReturn("127.0.0.1");
+        healthCheckProcessorV2Delegate.addProcessor(
+            Collections.singletonList(activeHealthCheckProcessor));
+        
+        healthCheckProcessorV2Delegate.process(healthCheckTaskV2, service, clusterMetadata);
+        
+        verify(activeHealthCheckProcessor).process(healthCheckTaskV2, service, clusterMetadata);
+    }
+    
+    @Test
+    void testProcessHttpHealthCheckerWithUnexpectedMetadataType() {
+        when(activeHealthCheckProcessor.getType()).thenReturn(HealthCheckType.HTTP.name());
+        when(clusterMetadata.getHealthyCheckType()).thenReturn(HealthCheckType.HTTP.name());
+        when(healthCheckTaskV2.getClient()).thenReturn(client);
+        when(client.getInstancePublishInfo(service)).thenReturn(instance);
+        when(instance.getIp()).thenReturn("127.0.0.1");
+        healthCheckProcessorV2Delegate.addProcessor(
+            Collections.singletonList(activeHealthCheckProcessor));
+        
+        healthCheckProcessorV2Delegate.process(healthCheckTaskV2, service, clusterMetadata);
+        
+        verify(activeHealthCheckProcessor, never()).process(healthCheckTaskV2, service,
+            clusterMetadata);
+    }
+    
+    @Test
+    void testProcessFallbackToNoneProcessor() {
+        when(noneHealthCheckProcessor.getType()).thenReturn(NoneHealthCheckProcessor.TYPE);
+        when(clusterMetadata.getHealthyCheckType()).thenReturn("UNKNOWN");
+        healthCheckProcessorV2Delegate.addProcessor(
+            Collections.singletonList(noneHealthCheckProcessor));
+        
+        healthCheckProcessorV2Delegate.process(healthCheckTaskV2, service, clusterMetadata);
+        
+        verify(noneHealthCheckProcessor).process(healthCheckTaskV2, service, clusterMetadata);
+    }
+    
+    @Test
+    void testGetType() {
+        assertNull(healthCheckProcessorV2Delegate.getType());
+    }
+    
+    private void mockActiveHealthCheck(String address) {
+        when(activeHealthCheckProcessor.getType()).thenReturn(HealthCheckType.TCP.name());
+        when(clusterMetadata.getHealthyCheckType()).thenReturn(HealthCheckType.TCP.name());
+        when(healthCheckTaskV2.getClient()).thenReturn(client);
+        when(client.getInstancePublishInfo(service)).thenReturn(instance);
+        when(instance.getIp()).thenReturn(address);
+        healthCheckProcessorV2Delegate.addProcessor(
+            Collections.singletonList(activeHealthCheckProcessor));
     }
 }

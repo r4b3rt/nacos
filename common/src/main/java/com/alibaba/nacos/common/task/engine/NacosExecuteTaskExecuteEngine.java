@@ -29,7 +29,8 @@ import java.util.Collection;
  *
  * @author xiweng.yy
  */
-public class NacosExecuteTaskExecuteEngine extends AbstractNacosTaskExecuteEngine<AbstractExecuteTask> {
+public class NacosExecuteTaskExecuteEngine
+    extends AbstractNacosTaskExecuteEngine<AbstractExecuteTask> {
     
     private final TaskExecuteWorker[] executeWorkers;
     
@@ -41,7 +42,8 @@ public class NacosExecuteTaskExecuteEngine extends AbstractNacosTaskExecuteEngin
         super(logger);
         executeWorkers = new TaskExecuteWorker[dispatchWorkerCount];
         for (int mod = 0; mod < dispatchWorkerCount; ++mod) {
-            executeWorkers[mod] = new TaskExecuteWorker(name, mod, dispatchWorkerCount, getEngineLog());
+            executeWorkers[mod] =
+                new TaskExecuteWorker(name, mod, dispatchWorkerCount, getEngineLog());
         }
     }
     
@@ -70,6 +72,24 @@ public class NacosExecuteTaskExecuteEngine extends AbstractNacosTaskExecuteEngin
         worker.process(task);
     }
     
+    /**
+     * Try to submit one task without waiting for a full worker queue.
+     *
+     * <p>Callers using this path must retain recoverable source state when the task is rejected.
+     * Existing {@link #addTask(Object, AbstractExecuteTask)} behavior remains unchanged.</p>
+     *
+     * @param tag task dispatch tag
+     * @param task execute task
+     * @return {@code true} when accepted by a processor or worker queue
+     */
+    public boolean tryAddTask(Object tag, AbstractExecuteTask task) {
+        NacosTaskProcessor processor = getProcessor(tag);
+        if (null != processor) {
+            return processor.process(task);
+        }
+        return getWorker(tag).tryProcess(task);
+    }
+    
     private TaskExecuteWorker getWorker(Object tag) {
         int idx = (tag.hashCode() & Integer.MAX_VALUE) % workersCount();
         return executeWorkers[idx];
@@ -86,7 +106,8 @@ public class NacosExecuteTaskExecuteEngine extends AbstractNacosTaskExecuteEngin
     
     @Override
     public Collection<Object> getAllTaskKeys() {
-        throw new UnsupportedOperationException("ExecuteTaskEngine do not support get all task keys");
+        throw new UnsupportedOperationException(
+            "ExecuteTaskEngine do not support get all task keys");
     }
     
     @Override
@@ -104,7 +125,7 @@ public class NacosExecuteTaskExecuteEngine extends AbstractNacosTaskExecuteEngin
     public String workersStatus() {
         StringBuilder sb = new StringBuilder();
         for (TaskExecuteWorker worker : executeWorkers) {
-            sb.append(worker.status()).append("\n");
+            sb.append(worker.status()).append('\n');
         }
         return sb.toString();
     }

@@ -35,13 +35,15 @@ class EditClusterDialog extends React.Component {
   constructor(props) {
     super(props);
     this.state = {
+      serviceName: '',
+      groupName: '',
       editCluster: {},
       editClusterDialogVisible: false,
     };
     this.show = this.show.bind(this);
   }
 
-  show(_editCluster) {
+  show(_editCluster, groupName, serviceName) {
     let editCluster = _editCluster;
     const { metadata = {} } = editCluster;
     if (Object.keys(metadata).length) {
@@ -50,6 +52,8 @@ class EditClusterDialog extends React.Component {
     this.setState({
       editCluster,
       editClusterDialogVisible: true,
+      groupName,
+      serviceName,
     });
   }
 
@@ -60,28 +64,28 @@ class EditClusterDialog extends React.Component {
   onConfirm() {
     const { openLoading, closeLoading, getServiceDetail } = this.props;
     const {
-      name,
-      serviceName,
+      clusterName,
       metadataText,
-      defaultCheckPort,
-      useIPPort4Check,
+      healthyCheckPort,
+      useInstancePortForCheck,
       healthChecker,
     } = this.state.editCluster;
     request({
       method: 'PUT',
-      url: 'v1/ns/cluster',
+      url: 'v3/console/ns/service/cluster',
       data: {
-        serviceName,
-        clusterName: name,
+        serviceName: this.state.serviceName,
+        groupName: this.state.groupName,
+        clusterName,
         metadata: metadataText,
-        checkPort: defaultCheckPort,
-        useInstancePort4Check: useIPPort4Check,
+        checkPort: healthyCheckPort,
+        useInstancePort4Check: useInstancePortForCheck,
         healthChecker: JSON.stringify(healthChecker),
       },
-      dataType: 'text',
+      dataType: 'json',
       beforeSend: () => openLoading(),
       success: res => {
-        if (res !== 'ok') {
+        if (res.data !== 'ok') {
           Message.error(res);
           return;
         }
@@ -105,8 +109,8 @@ class EditClusterDialog extends React.Component {
     const { editCluster = {}, editClusterDialogVisible } = this.state;
     const {
       healthChecker = {},
-      useIPPort4Check,
-      defaultCheckPort = '80',
+      useInstancePortForCheck,
+      healthyCheckPort = '80',
       metadataText = '',
     } = editCluster;
     const { type, path, headers } = healthChecker;
@@ -125,7 +129,7 @@ class EditClusterDialog extends React.Component {
         onClose={() => this.hide()}
       >
         <Form {...DIALOG_FORM_LAYOUT}>
-          <Form.Item label={`${checkType}:`}>
+          <Form.Item label={`${checkType}`}>
             <Select
               className="in-select"
               defaultValue={type}
@@ -136,28 +140,31 @@ class EditClusterDialog extends React.Component {
               <Select.Option value="NONE">NONE</Select.Option>
             </Select>
           </Form.Item>
-          <Form.Item label={`${checkPort}:`}>
+          <Form.Item label={`${checkPort}`}>
             <Input
               className="in-text"
-              value={defaultCheckPort}
-              onChange={defaultCheckPort => this.onChangeCluster({ defaultCheckPort })}
+              value={healthyCheckPort}
+              onChange={healthyCheckPort => this.onChangeCluster({ healthyCheckPort })}
+              disabled={useInstancePortForCheck}
             />
           </Form.Item>
-          <Form.Item label={`${useIpPortCheck}:`}>
+          <Form.Item label={`${useIpPortCheck}`}>
             <Switch
-              checked={useIPPort4Check}
-              onChange={useIPPort4Check => this.onChangeCluster({ useIPPort4Check })}
+              checked={useInstancePortForCheck}
+              onChange={useInstancePortForCheck => {
+                this.onChangeCluster({ useInstancePortForCheck });
+              }}
             />
           </Form.Item>
           {type === 'HTTP' && [
-            <Form.Item label={`${checkPath}:`}>
+            <Form.Item label={`${checkPath}`}>
               <Input
                 className="in-text"
                 value={path}
                 onChange={path => healthCheckerChange({ path })}
               />
             </Form.Item>,
-            <Form.Item label={`${checkHeaders}:`}>
+            <Form.Item label={`${checkHeaders}`}>
               <Input
                 className="in-text"
                 value={headers}
@@ -165,7 +172,7 @@ class EditClusterDialog extends React.Component {
               />
             </Form.Item>,
           ]}
-          <Form.Item label={`${locale.metadata}:`}>
+          <Form.Item label={`${locale.metadata}`}>
             <MonacoEditor
               language="json"
               width={'100%'}

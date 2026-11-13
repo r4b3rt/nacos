@@ -27,7 +27,7 @@
     <packaging>jar</packaging>
     
     <name>nacos-istio ${project.version}</name>
-    <url>http://nacos.io</url>
+    <url>https://nacos.io</url>
     
     <dependencies>
         <dependency>
@@ -36,7 +36,13 @@
         </dependency>
         <dependency>
             <groupId>${project.groupId}</groupId>
+            <artifactId>nacos-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
             <artifactId>nacos-client</artifactId>
+            <classifier>pure</classifier>
+            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>${project.groupId}</groupId>
@@ -72,23 +78,15 @@
             <artifactId>protobuf-java</artifactId>
         </dependency>
         <dependency>
-            <groupId>io.grpc</groupId>
-            <artifactId>protoc-gen-grpc-java</artifactId>
-            <type>pom</type>
-        </dependency>
-        <dependency>
-            <groupId>com.google.guava</groupId>
-            <artifactId>guava</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.netty</groupId>
-            <artifactId>netty-all</artifactId>
-        </dependency>
-        <!-- https://mvnrepository.com/artifact/io.envoyproxy.controlplane/api -->
-        <dependency>
             <groupId>io.envoyproxy.controlplane</groupId>
             <artifactId>api</artifactId>
             <version>0.1.27</version>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
     
@@ -98,7 +96,7 @@
             <extension>
                 <groupId>kr.motd.maven</groupId>
                 <artifactId>os-maven-plugin</artifactId>
-                <version>1.5.0.Final</version>
+                <version>1.7.1</version>
             </extension>
         </extensions>
         <plugins>
@@ -132,31 +130,34 @@
                 <artifactId>protobuf-maven-plugin</artifactId>
                 <version>0.6.1</version>
                 <configuration>
-                    <protocArtifact>com.google.protobuf:protoc:${protobuf-java.version}:exe:${os.detected.classifier}</protocArtifact>
                     <pluginId>grpc-java</pluginId>
+                    <protocArtifact>com.google.protobuf:protoc:${protobuf-java.version}:exe:${os.detected.classifier}</protocArtifact>
                     <pluginArtifact>io.grpc:protoc-gen-grpc-java:${protoc-gen-grpc-java.version}:exe:${os.detected.classifier}</pluginArtifact>
 
                     <useArgumentFile>true</useArgumentFile>
                     <checkStaleness>true</checkStaleness>
                     <staleMillis>10000</staleMillis>
+
+                    <protoSourceRoot>src/main/resources/proto</protoSourceRoot>
                 </configuration>
                 <executions>
                     <execution>
+                        <id>compile</id>
                         <goals>
                             <goal>compile</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>compile-custom</id>
+                        <goals>
                             <goal>compile-custom</goal>
                         </goals>
+                        <configuration>
+                            <temporaryProtoFileDirectory>${project.build.directory}/protoc-dependencies-custom</temporaryProtoFileDirectory>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
         </plugins>
-        <resources>
-            <resource>
-                <directory>src/main/resources</directory>
-                <!--<excludes>-->
-                <!--<exclude>application.properties</exclude>-->
-                <!--</excludes>-->
-            </resource>
-        </resources>
     </build>
 </project>

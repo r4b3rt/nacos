@@ -79,7 +79,7 @@ class ConfigSync extends React.Component {
     request({
       url: '/diamond-ops/env/domain',
       success(data) {
-        if (data.code === 200) {
+        if (data.code === 0) {
           const { envGroups } = data.data;
 
           self.setState({
@@ -93,7 +93,7 @@ class ConfigSync extends React.Component {
   getDataDetail() {
     const self = this;
     const { locale = {} } = this.props;
-    this.tenant = getParams('namespace') || '';
+    this.tenant = getParams('namespace') || 'public';
     this.serverId = getParams('serverId') || 'center';
     let url = `/diamond-ops/configList/detail/serverId/${this.serverId}/dataId/${this.dataId}/group/${this.group}/tenant/${this.tenant}?id=`;
     if (this.tenant === 'global' || !this.tenant) {
@@ -105,7 +105,7 @@ class ConfigSync extends React.Component {
         self.openLoading();
       },
       success(result) {
-        if (result.code === 200) {
+        if (result.code === 0) {
           const { data = {} } = result;
 
           self.field.setValue('dataId', data.dataId);
@@ -177,7 +177,7 @@ class ConfigSync extends React.Component {
         _payload.content = '';
         _payload.dataId = payload.dataId;
         _payload.group = payload.group;
-        _payload.isok = res.code === 200;
+        _payload.isok = res.code === 0;
         if (!_payload.isok) {
           _payload.isok = false;
           _payload.message = res.message;
@@ -236,7 +236,7 @@ class ConfigSync extends React.Component {
     };
 
     return (
-      <div style={{ padding: 10 }}>
+      <div>
         <Loading
           shape="flower"
           style={{ position: 'relative', width: '100%' }}
@@ -246,7 +246,7 @@ class ConfigSync extends React.Component {
         >
           <h1>{locale.syncConfiguration}</h1>
           <Form field={this.field}>
-            <Form.Item label="Data ID:" required {...formItemLayout}>
+            <Form.Item label="Data ID" required {...formItemLayout}>
               <Input htmlType="text" disabled={'disabled'} {...init('dataId')} />
               <div style={{ marginTop: 10 }}>
                 <a style={{ fontSize: '12px' }} onClick={this.toggleMore.bind(this)}>
@@ -255,7 +255,7 @@ class ConfigSync extends React.Component {
               </div>
             </Form.Item>
             <div style={{ overflow: 'hidden', height: this.state.showmore ? 'auto' : '0' }}>
-              <Form.Item label="Group ID:" required {...formItemLayout}>
+              <Form.Item label="Group ID" required {...formItemLayout}>
                 <Input htmlType="text" disabled={'disabled'} {...init('group')} />
               </Form.Item>
               <Form.Item label={locale.home} required {...formItemLayout}>

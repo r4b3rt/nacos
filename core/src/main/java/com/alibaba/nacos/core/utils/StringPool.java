@@ -25,12 +25,14 @@ import java.util.concurrent.TimeUnit;
  * StringPool,aim to reduce memory allocation.
  *
  * @author liuzunfei
+ * @author ZZQ
  * @version $Id: StringPool.java, v 0.1 2020年11月12日 3:05 PM liuzunfei Exp $
  */
 public class StringPool {
     
-    private static Cache<String, String> groupKeyCache = CacheBuilder.newBuilder().maximumSize(5000000)
-            .expireAfterAccess(180, TimeUnit.SECONDS).build();
+    private static Cache<String, String> groupKeyCache =
+        CacheBuilder.newBuilder().maximumSize(5000000)
+            .expireAfterAccess(60, TimeUnit.SECONDS).build();
     
     /**
      * get singleton string value from the pool.
@@ -48,7 +50,7 @@ public class StringPool {
             value = groupKeyCache.getIfPresent(key);
         }
         
-        return value;
+        return value == null ? key : value;
     }
     
     public static long size() {

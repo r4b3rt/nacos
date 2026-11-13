@@ -20,15 +20,15 @@ import com.alibaba.nacos.common.notify.NotifyCenter;
 import com.alibaba.nacos.core.cluster.MemberChangeListener;
 import com.alibaba.nacos.core.cluster.MemberUtil;
 import com.alibaba.nacos.core.cluster.MembersChangeEvent;
-import com.alibaba.nacos.core.cluster.NodeState;
+import com.alibaba.nacos.api.common.NodeState;
 import com.alibaba.nacos.core.cluster.ServerMemberManager;
 import com.alibaba.nacos.naming.misc.Loggers;
 import com.alibaba.nacos.naming.misc.SwitchDomain;
 import com.alibaba.nacos.sys.env.EnvUtil;
+import jakarta.annotation.PostConstruct;
 import org.apache.commons.collections.CollectionUtils;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -69,11 +69,6 @@ public class DistroMapper extends MemberChangeListener {
         this.healthyList = MemberUtil.simpleMembers(memberManager.allMembers());
     }
     
-    public boolean responsible(Cluster cluster, Instance instance) {
-        return switchDomain.isHealthCheckEnabled(cluster.getServiceName()) && !cluster.getHealthCheckTask()
-                .isCancelled() && responsible(cluster.getServiceName()) && cluster.contains(instance);
-    }
-    
     /**
      * Judge whether current server is responsible for input tag.
      *
@@ -92,8 +87,9 @@ public class DistroMapper extends MemberChangeListener {
             return false;
         }
         
-        int index = servers.indexOf(EnvUtil.getLocalAddress());
-        int lastIndex = servers.lastIndexOf(EnvUtil.getLocalAddress());
+        String localAddress = EnvUtil.getLocalAddress();
+        int index = servers.indexOf(localAddress);
+        int lastIndex = servers.lastIndexOf(localAddress);
         if (lastIndex < 0 || index < 0) {
             return true;
         }
@@ -120,7 +116,8 @@ public class DistroMapper extends MemberChangeListener {
             return servers.get(index);
         } catch (Throwable e) {
             Loggers.SRV_LOG
-                    .warn("[NACOS-DISTRO] distro mapper failed, return localhost: " + EnvUtil.getLocalAddress(), e);
+                .warn("[NACOS-DISTRO] distro mapper failed, return localhost: "
+                    + EnvUtil.getLocalAddress(), e);
             return EnvUtil.getLocalAddress();
         }
     }
@@ -133,12 +130,15 @@ public class DistroMapper extends MemberChangeListener {
     public void onEvent(MembersChangeEvent event) {
         // Here, the node list must be sorted to ensure that all nacos-server's
         // node list is in the same order
-        List<String> list = MemberUtil.simpleMembers(MemberUtil.selectTargetMembers(event.getMembers(),
-                member -> NodeState.UP.equals(member.getState()) || NodeState.SUSPICIOUS.equals(member.getState())));
+        List<String> list =
+            MemberUtil.simpleMembers(MemberUtil.selectTargetMembers(event.getMembers(),
+                member -> NodeState.UP.equals(member.getState())
+                    || NodeState.SUSPICIOUS.equals(member.getState())));
         Collections.sort(list);
         Collection<String> old = healthyList;
         healthyList = Collections.unmodifiableList(list);
-        Loggers.SRV_LOG.info("[NACOS-DISTRO] healthy server list changed, old: {}, new: {}", old, healthyList);
+        Loggers.SRV_LOG.info("[NACOS-DISTRO] healthy server list changed, old: {}, new: {}", old,
+            healthyList);
     }
     
     @Override

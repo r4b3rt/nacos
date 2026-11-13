@@ -20,26 +20,22 @@ import com.alibaba.nacos.api.PropertyKeyConst;
 import com.alibaba.nacos.api.common.Constants;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.client.config.filter.impl.ConfigResponse;
-import com.alibaba.nacos.client.identify.StsConfig;
+import com.alibaba.nacos.client.env.NacosClientProperties;
 import com.alibaba.nacos.client.security.SecurityProxy;
-import com.alibaba.nacos.client.utils.LogUtils;
-import com.alibaba.nacos.client.utils.ParamUtil;
-import com.alibaba.nacos.common.http.HttpRestResult;
-import com.alibaba.nacos.common.http.param.Header;
-import com.alibaba.nacos.common.http.param.Query;
+import com.alibaba.nacos.client.utils.AppNameUtils;
+import com.alibaba.nacos.client.utils.ClientBasicParamUtil;
+import com.alibaba.nacos.common.executor.NameThreadFactory;
 import com.alibaba.nacos.common.utils.ConvertUtils;
-import com.alibaba.nacos.common.utils.JacksonUtils;
 import com.alibaba.nacos.common.utils.MD5Utils;
 import com.alibaba.nacos.common.utils.StringUtils;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.core.type.TypeReference;
-import org.slf4j.Logger;
+import com.alibaba.nacos.plugin.auth.api.RequestResource;
 
-import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -48,14 +44,7 @@ import java.util.concurrent.TimeUnit;
  * @author liuzunfei
  * @version $Id: ConfigTransportClient.java, v 0.1 2020年08月24日 2:01 PM liuzunfei Exp $
  */
-@SuppressWarnings("PMD.AbstractClassShouldStartWithAbstractNamingRule")
 public abstract class ConfigTransportClient {
-    
-    private static final Logger LOGGER = LogUtils.logger(ConfigTransportClient.class);
-    
-    private static final String SECURITY_TOKEN_HEADER =  "Spas-SecurityToken";
-    
-    private static final String ACCESS_KEY_HEADER = "Spas-AccessKey";
     
     private static final String CONFIG_INFO_HEADER = "exConfigInfo";
     
@@ -65,27 +54,32 @@ public abstract class ConfigTransportClient {
     
     String tenant;
     
-    ScheduledExecutorService executor;
+    private ThreadPoolExecutor executor;
     
-    final ServerListManager serverListManager;
+    final ConfigServerListManager serverListManager;
+    
+    final Properties properties;
     
     private int maxRetry = 3;
     
     private final long securityInfoRefreshIntervalMills = TimeUnit.SECONDS.toMillis(5);
     
+    private ScheduledExecutorService loginScheduledExecutor;
+    
     protected SecurityProxy securityProxy;
     
-    private String accessKey;
-    
-    protected String secretKey;
-    
-    private volatile StsCredential stsCredential;
-    
-    public void shutdown() {
-    
+    /**
+     * Shut down to ensure resource release.
+     */
+    public void shutdown() throws NacosException {
+        securityProxy.shutdown();
+        if (loginScheduledExecutor != null && !loginScheduledExecutor.isShutdown()) {
+            loginScheduledExecutor.shutdown();
+        }
     }
     
-    public ConfigTransportClient(Properties properties, ServerListManager serverListManager) {
+    public ConfigTransportClient(NacosClientProperties properties,
+        ConfigServerListManager serverListManager) {
         
         String encodeTmp = properties.getProperty(PropertyKeyConst.ENCODE);
         if (StringUtils.isBlank(encodeTmp)) {
@@ -96,47 +90,26 @@ public abstract class ConfigTransportClient {
         
         this.tenant = properties.getProperty(PropertyKeyConst.NAMESPACE);
         this.serverListManager = serverListManager;
-        this.securityProxy = new SecurityProxy(properties,
-                ConfigHttpClientManager.getInstance().getNacosRestTemplate());
-        initAkSk(properties);
+        this.properties = properties.asProperties();
+        this.securityProxy = new SecurityProxy(serverListManager,
+            ConfigHttpClientManager.getInstance().getNacosRestTemplate());
     }
     
     /**
-     * Spas-SecurityToken/Spas-AccessKey.
+     * Build the resource for current request.
      *
-     * @return spas headers map.
-     * @throws Exception exeption may throw.
+     * @param tenant tenant of config
+     * @param group  group of config
+     * @param dataId dataId of config
+     * @return resource
      */
-    protected Map<String, String> getSpasHeaders() throws Exception {
-        
-        Map<String, String> spasHeaders = new HashMap<String, String>(2);
-        
-        // STS 临时凭证鉴权的优先级高于 AK/SK 鉴权
-        if (StsConfig.getInstance().isStsOn()) {
-            StsCredential stsCredential = getStsCredential();
-            accessKey = stsCredential.accessKeyId;
-            secretKey = stsCredential.accessKeySecret;
-            spasHeaders.put(SECURITY_TOKEN_HEADER, stsCredential.securityToken);
-        }
-        
-        if (StringUtils.isNotEmpty(accessKey) && StringUtils.isNotBlank(secretKey)) {
-            spasHeaders.put(ACCESS_KEY_HEADER, accessKey);
-        }
-        return spasHeaders;
+    protected RequestResource buildResource(String tenant, String group, String dataId) {
+        return RequestResource.configBuilder().setNamespace(tenant).setGroup(group)
+            .setResource(dataId).build();
     }
     
-    /**
-     * get accessToken from server of using username/password.
-     *
-     * @return map that contains accessToken , null if acessToken is empty.
-     */
-    protected Map<String, String> getSecurityHeaders() {
-        if (StringUtils.isBlank(securityProxy.getAccessToken())) {
-            return null;
-        }
-        Map<String, String> spasHeaders = new HashMap<String, String>(2);
-        spasHeaders.put(Constants.ACCESS_TOKEN, securityProxy.getAccessToken());
-        return spasHeaders;
+    protected Map<String, String> getSecurityHeaders(RequestResource resource) throws Exception {
+        return securityProxy.getIdentityContext(resource);
     }
     
     /**
@@ -145,12 +118,12 @@ public abstract class ConfigTransportClient {
      * @return headers.
      */
     protected Map<String, String> getCommonHeader() {
-        Map<String, String> headers = new HashMap<String, String>(16);
+        Map<String, String> headers = new HashMap<>(16);
         
         String ts = String.valueOf(System.currentTimeMillis());
-        String token = MD5Utils.md5Hex(ts + ParamUtil.getAppKey(), Constants.ENCODE);
+        String token = MD5Utils.md5Hex(ts + ClientBasicParamUtil.getAppKey(), Constants.ENCODE);
         
-        headers.put(Constants.CLIENT_APPNAME_HEADER, ParamUtil.getAppName());
+        headers.put(Constants.CLIENT_APPNAME_HEADER, AppNameUtils.getAppName());
         headers.put(Constants.CLIENT_REQUEST_TS_HEADER, ts);
         headers.put(Constants.CLIENT_REQUEST_TOKEN_HEADER, token);
         headers.put(CONFIG_INFO_HEADER, DEFAULT_CONFIG_INFO);
@@ -158,101 +131,34 @@ public abstract class ConfigTransportClient {
         return headers;
     }
     
-    public String getAccessToken() {
-        return securityProxy.getAccessToken();
-    }
-    
-    private StsCredential getStsCredential() throws Exception {
-        boolean cacheSecurityCredentials = StsConfig.getInstance().isCacheSecurityCredentials();
-        if (cacheSecurityCredentials && stsCredential != null) {
-            long currentTime = System.currentTimeMillis();
-            long expirationTime = stsCredential.expiration.getTime();
-            int timeToRefreshInMillisecond = StsConfig.getInstance().getTimeToRefreshInMillisecond();
-            if (expirationTime - currentTime > timeToRefreshInMillisecond) {
-                return stsCredential;
-            }
-        }
-        String stsResponse = getStsResponse();
-        stsCredential = JacksonUtils.toObj(stsResponse, new TypeReference<StsCredential>() {
-        });
-        LOGGER.info("[getSTSCredential] code:{}, accessKeyId:{}, lastUpdated:{}, expiration:{}",
-                stsCredential.getCode(), stsCredential.getAccessKeyId(), stsCredential.getLastUpdated(),
-                stsCredential.getExpiration());
-        return stsCredential;
-    }
-    
-    private static String getStsResponse() throws Exception {
-        String securityCredentials = StsConfig.getInstance().getSecurityCredentials();
-        if (securityCredentials != null) {
-            return securityCredentials;
-        }
-        String securityCredentialsUrl = StsConfig.getInstance().getSecurityCredentialsUrl();
-        try {
-            HttpRestResult<String> result = ConfigHttpClientManager.getInstance().getNacosRestTemplate()
-                    .get(securityCredentialsUrl, Header.EMPTY, Query.EMPTY, String.class);
-            
-            if (!result.ok()) {
-                LOGGER.error(
-                        "can not get security credentials, securityCredentialsUrl: {}, responseCode: {}, response: {}",
-                        securityCredentialsUrl, result.getCode(), result.getMessage());
-                throw new NacosException(NacosException.SERVER_ERROR,
-                        "can not get security credentials, responseCode: " + result.getCode() + ", response: " + result
-                                .getMessage());
-            }
-            return result.getData();
-        } catch (Exception e) {
-            LOGGER.error("can not get security credentials", e);
-            throw e;
-        }
-    }
-    
-    private void initAkSk(Properties properties) {
-        String ramRoleName = properties.getProperty(PropertyKeyConst.RAM_ROLE_NAME);
-        if (!StringUtils.isBlank(ramRoleName)) {
-            StsConfig.getInstance().setRamRoleName(ramRoleName);
-        }
-        
-        String ak = properties.getProperty(PropertyKeyConst.ACCESS_KEY);
-        if (StringUtils.isBlank(ak)) {
-            accessKey = SpasAdapter.getAk();
-        } else {
-            accessKey = ak;
-        }
-        
-        String sk = properties.getProperty(PropertyKeyConst.SECRET_KEY);
-        if (StringUtils.isBlank(sk)) {
-            secretKey = SpasAdapter.getSk();
-        } else {
-            secretKey = sk;
-        }
-    }
-    
     private void initMaxRetry(Properties properties) {
-        maxRetry = ConvertUtils.toInt(String.valueOf(properties.get(PropertyKeyConst.MAX_RETRY)), Constants.MAX_RETRY);
+        maxRetry = ConvertUtils.toInt(String.valueOf(properties.get(PropertyKeyConst.MAX_RETRY)),
+            Constants.MAX_RETRY);
     }
     
-    public void setExecutor(ScheduledExecutorService executor) {
+    public void setExecutor(ThreadPoolExecutor executor) {
         this.executor = executor;
+    }
+    
+    public ThreadPoolExecutor getExecutor() {
+        return this.executor;
     }
     
     /**
      * base start client.
      */
     public void start() throws NacosException {
-        
-        if (securityProxy.isEnabled()) {
-            securityProxy.login(serverListManager.getServerUrls());
-            
-            this.executor.scheduleWithFixedDelay(new Runnable() {
-                @Override
-                public void run() {
-                    securityProxy.login(serverListManager.getServerUrls());
-                }
-            }, 0, this.securityInfoRefreshIntervalMills, TimeUnit.MILLISECONDS);
-            
-        }
-        
+        securityProxy.login(this.properties);
+        this.loginScheduledExecutor =
+            Executors.newSingleThreadScheduledExecutor(
+                new NameThreadFactory("com.alibaba.nacos.client.login-executor"));
+        this.loginScheduledExecutor.scheduleWithFixedDelay(() -> securityProxy.login(properties), 0,
+            this.securityInfoRefreshIntervalMills, TimeUnit.MILLISECONDS);
         startInternal();
+    }
+    
+    public void reLogin() {
+        securityProxy.reLogin();
     }
     
     /**
@@ -294,8 +200,10 @@ public abstract class ConfigTransportClient {
     
     /**
      * listen change .
+     *
+     * @throws NacosException nacos exception throws, should retry.
      */
-    public abstract void executeConfigListen();
+    public abstract void executeConfigListen() throws NacosException;
     
     /**
      * remove cache implements.
@@ -316,8 +224,9 @@ public abstract class ConfigTransportClient {
      * @return content.
      * @throws NacosException throw where query fail .
      */
-    public abstract ConfigResponse queryConfig(String dataId, String group, String tenat, long readTimeous,
-            boolean notify) throws NacosException;
+    public abstract ConfigResponse queryConfig(String dataId, String group, String tenat,
+        long readTimeous,
+        boolean notify) throws NacosException;
     
     /**
      * publish config.
@@ -335,8 +244,10 @@ public abstract class ConfigTransportClient {
      * @return success or not.
      * @throws NacosException throw where publish fail.
      */
-    public abstract boolean publishConfig(String dataId, String group, String tenant, String appName, String tag,
-            String betaIps, String content, String encryptedDataKey, String casMd5, String type) throws NacosException;
+    public abstract boolean publishConfig(String dataId, String group, String tenant,
+        String appName, String tag,
+        String betaIps, String content, String encryptedDataKey, String casMd5, String type)
+        throws NacosException;
     
     /**
      * remove config.
@@ -348,50 +259,7 @@ public abstract class ConfigTransportClient {
      * @return success or not.
      * @throws NacosException throw where publish fail.
      */
-    public abstract boolean removeConfig(String dataid, String group, String tenat, String tag) throws NacosException;
-    
-    private static class StsCredential {
-        
-        @JsonProperty(value = "AccessKeyId")
-        private String accessKeyId;
-        
-        @JsonProperty(value = "AccessKeySecret")
-        private String accessKeySecret;
-        
-        @JsonProperty(value = "Expiration")
-        private Date expiration;
-        
-        @JsonProperty(value = "SecurityToken")
-        private String securityToken;
-        
-        @JsonProperty(value = "LastUpdated")
-        private Date lastUpdated;
-        
-        @JsonProperty(value = "Code")
-        private String code;
-        
-        public String getAccessKeyId() {
-            return accessKeyId;
-        }
-        
-        public Date getExpiration() {
-            return expiration;
-        }
-        
-        public Date getLastUpdated() {
-            return lastUpdated;
-        }
-        
-        public String getCode() {
-            return code;
-        }
-        
-        @Override
-        public String toString() {
-            return "STSCredential{" + "accessKeyId='" + accessKeyId + '\'' + ", accessKeySecret='" + accessKeySecret
-                    + '\'' + ", expiration=" + expiration + ", securityToken='" + securityToken + '\''
-                    + ", lastUpdated=" + lastUpdated + ", code='" + code + '\'' + '}';
-        }
-    }
+    public abstract boolean removeConfig(String dataid, String group, String tenat, String tag)
+        throws NacosException;
     
 }

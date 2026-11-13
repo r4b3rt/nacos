@@ -16,6 +16,7 @@
 
 package com.alibaba.nacos.naming.push.v2.task;
 
+import com.alibaba.nacos.api.naming.remote.request.AbstractFuzzyWatchNotifyRequest;
 import com.alibaba.nacos.api.remote.PushCallBack;
 import com.alibaba.nacos.naming.pojo.Subscriber;
 import com.alibaba.nacos.naming.push.v2.PushDataWrapper;
@@ -33,7 +34,20 @@ public class FixturePushExecutor implements PushExecutor {
     
     @Override
     public void doPushWithCallback(String clientId, Subscriber subscriber, PushDataWrapper data,
-            PushCallBack callBack) {
+        NamingPushCallback callBack) {
+        callBack.getTimeout();
+        callBack.setActualServiceInfo(data.getOriginalData());
+        if (shouldSuccess) {
+            callBack.onSuccess();
+        } else {
+            callBack.onFail(failedException);
+        }
+    }
+    
+    @Override
+    public void doFuzzyWatchNotifyPushWithCallBack(String clientId,
+        AbstractFuzzyWatchNotifyRequest watchNotifyRequest,
+        PushCallBack callBack) {
         if (shouldSuccess) {
             callBack.onSuccess();
         } else {

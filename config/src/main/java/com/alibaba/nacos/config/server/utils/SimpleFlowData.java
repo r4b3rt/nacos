@@ -41,8 +41,8 @@ public class SimpleFlowData {
     private int slotCount;
     
     private ScheduledExecutorService timer = ExecutorFactory.Managed
-            .newSingleScheduledExecutorService(ClassUtils.getCanonicalName(Config.class),
-                    new NameThreadFactory("com.alibaba.nacos.config.flow.control"));
+        .newSingleScheduledExecutorService(ClassUtils.getCanonicalName(Config.class),
+            new NameThreadFactory("com.alibaba.nacos.config.flow.control"));
     
     public SimpleFlowData(int slotCount, int interval) {
         this.slotCount = slotCount;
@@ -50,14 +50,7 @@ public class SimpleFlowData {
         for (int i = 0; i < data.length; i++) {
             data[i] = new AtomicInteger(0);
         }
-        timer.scheduleAtFixedRate(new Runnable() {
-            
-            @Override
-            public void run() {
-                rotateSlot();
-            }
-            
-        }, interval, interval, TimeUnit.MILLISECONDS);
+        timer.scheduleAtFixedRate(this::rotateSlot, interval, interval, TimeUnit.MILLISECONDS);
     }
     
     public int addAndGet(int count) {
@@ -103,7 +96,7 @@ public class SimpleFlowData {
         
         for (int i = 0; i < slotCount; i++) {
             if (i > 0) {
-                sb.append(" ");
+                sb.append(' ');
             }
             sb.append(this.data[(i + index) % slotCount].get());
         }

@@ -16,14 +16,15 @@
 
 package com.alibaba.nacos.common.notify;
 
-import com.alibaba.nacos.common.utils.BiFunction;
+import java.util.function.BiFunction;
 
 /**
  * Event publisher factory.
  *
  * @author xiweng.yy
  */
-public interface EventPublisherFactory extends BiFunction<Class<? extends Event>, Integer, EventPublisher> {
+public interface EventPublisherFactory
+    extends BiFunction<Class<? extends Event>, Integer, EventPublisher> {
     
     /**
      * Build an new {@link EventPublisher}.

@@ -17,11 +17,18 @@
 package com.alibaba.nacos.common.utils;
 
 import java.lang.reflect.Array;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Set;
 
 /**
  * Copy from {@link org.apache.commons.collections}.
@@ -29,6 +36,14 @@ import java.util.Map;
  * @author <a href="mailto:liaochuntao@live.com">liaochuntao</a>
  */
 public final class CollectionUtils {
+    
+    /**
+     * Constant to avoid repeated object creation.
+     */
+    private static final Integer INTEGER_ONE = 1;
+    
+    private CollectionUtils() {
+    }
     
     /**
      * Returns the <code>index</code>-th value in <code>object</code>, throwing
@@ -103,7 +118,8 @@ public final class CollectionUtils {
             try {
                 return Array.get(object, index);
             } catch (IllegalArgumentException ex) {
-                throw new IllegalArgumentException("Unsupported object type: " + object.getClass().getName());
+                throw new IllegalArgumentException(
+                    "Unsupported object type: " + object.getClass().getName());
             }
         }
     }
@@ -151,7 +167,8 @@ public final class CollectionUtils {
             try {
                 total = Array.getLength(object);
             } catch (IllegalArgumentException ex) {
-                throw new IllegalArgumentException("Unsupported object type: " + object.getClass().getName());
+                throw new IllegalArgumentException(
+                    "Unsupported object type: " + object.getClass().getName());
             }
         }
         return total;
@@ -181,7 +198,8 @@ public final class CollectionUtils {
             try {
                 return Array.getLength(object) == 0;
             } catch (IllegalArgumentException ex) {
-                throw new IllegalArgumentException("Unsupported object type: " + object.getClass().getName());
+                throw new IllegalArgumentException(
+                    "Unsupported object type: " + object.getClass().getName());
             }
         }
     }
@@ -231,18 +249,158 @@ public final class CollectionUtils {
      * Returns the value to which the specified index , or {@code defaultValue} if this collection contains no value for
      * the index.
      *
-     * @param coll         the collection to get a value from
+     * @param obj          the object to get a value from
      * @param index        the index to get
      * @param defaultValue default value
      * @param <T>          General Type
      * @return the value to which the specified index , or {@code defaultValue} if this collection contains no value for
      * the index.
      */
-    public static <T> T getOrDefault(Collection<T> coll, int index, T defaultValue) {
+    public static <T> T getOrDefault(Object obj, int index, T defaultValue) {
         try {
-            return (T) get(coll, index);
+            return (T) get(obj, index);
         } catch (IndexOutOfBoundsException e) {
             return defaultValue;
         }
+    }
+    
+    /**
+     * return an arraylist containing all input parameters.
+     *
+     * @param elements element array
+     * @return arraylist containing all input parameters
+     * @author zzq
+     */
+    public static <T> List<T> list(T... elements) {
+        if (elements == null) {
+            throw new IllegalArgumentException(
+                "Expected an array of elements (or empty array) but received a null.");
+        }
+        ArrayList<T> list = new ArrayList<>(elements.length);
+        Collections.addAll(list, elements);
+        return list;
+    }
+    
+    /**
+     * Return a set containing all input parameters.
+     *
+     * @param elements elements element array
+     * @return set containing all input parameters
+     */
+    public static <T> Set<T> set(T... elements) {
+        if (elements == null) {
+            throw new IllegalArgumentException(
+                "Expected an array of elements (or empty array) but received a null.");
+        } else {
+            return new LinkedHashSet<>(Arrays.asList(elements));
+        }
+    }
+    
+    /**
+     * return the first element, if the iterator contains multiple elements, will throw {@code
+     * IllegalArgumentException}.
+     *
+     * @throws NoSuchElementException   if the iterator is empty
+     * @throws IllegalArgumentException if the iterator contains multiple elements. The state of the iterator is
+     *                                  unspecified.
+     */
+    public static <T> T getOnlyElement(Iterable<T> iterable) {
+        if (iterable == null) {
+            throw new IllegalArgumentException("iterable cannot be null.");
+        }
+        Iterator<T> iterator = iterable.iterator();
+        T first = iterator.next();
+        if (!iterator.hasNext()) {
+            return first;
+        }
+        throw new IllegalArgumentException(buildExceptionMessage(iterator, first));
+    }
+    
+    private static <T> String buildExceptionMessage(Iterator<T> iterator, T first) {
+        StringBuilder msg = new StringBuilder();
+        msg.append("expected one element but was: <");
+        msg.append(first);
+        for (int i = 0; i < 4 && iterator.hasNext(); i++) {
+            msg.append(", ");
+            msg.append(iterator.next());
+        }
+        if (iterator.hasNext()) {
+            msg.append(", ...");
+        }
+        msg.append('>');
+        return msg.toString();
+    }
+    
+    /**
+     * Return {@code true} if the supplied Map is {@code null} or empty. Otherwise, return {@code false}.
+     *
+     * @param map the Map to check
+     * @return whether the given Map is empty
+     */
+    public static boolean isMapEmpty(Map<?, ?> map) {
+        return (map == null || map.isEmpty());
+    }
+    
+    /**
+     * Returns a {@link Map} mapping each unique element in the given {@link Collection} to an {@link Integer}
+     * representing the number of occurrences of that element in the {@link Collection}.
+     *
+     * <p>Only those elements present in the collection will appear as keys in the map.
+     *
+     * @param coll the collection to get the cardinality map for, must not be null
+     * @return the populated cardinality map
+     */
+    public static Map getCardinalityMap(final Collection coll) {
+        Map count = new HashMap(coll.size());
+        for (Iterator it = coll.iterator(); it.hasNext();) {
+            Object obj = it.next();
+            Integer c = (Integer) (count.get(obj));
+            if (c == null) {
+                count.put(obj, INTEGER_ONE);
+            } else {
+                count.put(obj, c + 1);
+            }
+        }
+        return count;
+    }
+    
+    /**
+     * Returns <tt>true</tt> iff the given {@link Collection}s contain exactly the same elements with exactly the same
+     * cardinalities.
+     *
+     * <p>That is, iff the cardinality of <i>e</i> in <i>a</i> is equal to the cardinality of <i>e</i> in <i>b</i>, for
+     * each element <i>e</i> in <i>a</i> or <i>b</i>.
+     *
+     * @param a the first collection, must not be null
+     * @param b the second collection, must not be null
+     * @return <code>true</code> iff the collections contain the same elements with the same cardinalities.
+     */
+    public static boolean isEqualCollection(final Collection a, final Collection b) {
+        if (a.size() != b.size()) {
+            return false;
+        } else {
+            Map mapa = getCardinalityMap(a);
+            Map mapb = getCardinalityMap(b);
+            if (mapa.size() != mapb.size()) {
+                return false;
+            } else {
+                Iterator it = mapa.keySet().iterator();
+                while (it.hasNext()) {
+                    Object obj = it.next();
+                    if (getFreq(obj, mapa) != getFreq(obj, mapb)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+    }
+    
+    private static int getFreq(final Object obj, final Map freqMap) {
+        Integer count = (Integer) freqMap.get(obj);
+        if (count != null) {
+            return count.intValue();
+        }
+        return 0;
     }
 }

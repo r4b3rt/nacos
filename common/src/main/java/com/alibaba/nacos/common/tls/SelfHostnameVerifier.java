@@ -36,9 +36,10 @@ public final class SelfHostnameVerifier implements HostnameVerifier {
     
     private final HostnameVerifier hv;
     
-    private static ConcurrentHashMap<String, Boolean> hosts = new ConcurrentHashMap<String, Boolean>();
+    private static final ConcurrentHashMap<String, Boolean> HOSTS = new ConcurrentHashMap<>();
     
-    private static final String[] LOCALHOST_HOSTNAME = new String[] {"localhost", InternetAddressUtil.localHostIP()};
+    private static final String[] LOCALHOST_HOSTNAME = new String[] {InternetAddressUtil.LOCAL_HOST,
+        InternetAddressUtil.localHostIp()};
     
     public SelfHostnameVerifier(HostnameVerifier hv) {
         this.hv = hv;
@@ -46,26 +47,27 @@ public final class SelfHostnameVerifier implements HostnameVerifier {
     
     @Override
     public boolean verify(String hostname, SSLSession session) {
-        if (LOCALHOST_HOSTNAME[0].equalsIgnoreCase(hostname) || LOCALHOST_HOSTNAME[1].equals(hostname)) {
+        if (LOCALHOST_HOSTNAME[0].equalsIgnoreCase(hostname)
+            || LOCALHOST_HOSTNAME[1].equals(hostname)) {
             return true;
         }
-        if (isIP(hostname)) {
+        if (isIp(hostname)) {
             return true;
         }
         return hv.verify(hostname, session);
     }
     
-    private static boolean isIP(String host) {
+    private static boolean isIp(String host) {
         if (host == null || host.isEmpty()) {
-            LOGGER.warn("host is empty, isIP = false");
+            LOGGER.warn("host is empty, isIp = false");
             return false;
         }
-        Boolean cacheHostVerify = hosts.get(host);
+        Boolean cacheHostVerify = HOSTS.get(host);
         if (cacheHostVerify != null) {
             return cacheHostVerify;
         }
-        boolean isIp = InternetAddressUtil.isIP(host);
-        hosts.putIfAbsent(host, isIp);
+        boolean isIp = InternetAddressUtil.isIp(host);
+        HOSTS.putIfAbsent(host, isIp);
         return isIp;
     }
 }

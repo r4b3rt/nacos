@@ -58,8 +58,15 @@ public class ClientEvent extends Event {
         
         private static final long serialVersionUID = 370348024867174101L;
         
-        public ClientDisconnectEvent(Client client) {
+        private boolean isNative;
+        
+        public boolean isNative() {
+            return isNative;
+        }
+        
+        public ClientDisconnectEvent(Client client, boolean isNative) {
             super(client);
+            this.isNative = isNative;
         }
         
     }
@@ -68,9 +75,9 @@ public class ClientEvent extends Event {
      * Client add event. Happened when verify failed.
      */
     public static class ClientVerifyFailedEvent extends ClientEvent {
-    
+        
         private static final long serialVersionUID = 2023951686223780851L;
-    
+        
         private final String clientId;
         
         private final String targetServer;

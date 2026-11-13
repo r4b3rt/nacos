@@ -18,11 +18,11 @@ package com.alibaba.nacos.config.server.model;
 
 import com.alibaba.nacos.common.utils.MD5Utils;
 import com.alibaba.nacos.config.server.constant.Constants;
-import com.fasterxml.jackson.databind.annotation.JsonSerialize;
-import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
+import com.fasterxml.jackson.annotation.JsonFormat;
 
 import java.io.PrintWriter;
 import java.io.Serializable;
+import java.util.Objects;
 
 /**
  * ConfigInfoBase.
@@ -32,9 +32,9 @@ import java.io.Serializable;
  */
 public class ConfigInfoBase implements Serializable, Comparable<ConfigInfoBase> {
     
-    static final long serialVersionUID = -1L;
+    static final long serialVersionUID = 265316491795790798L;
     
-    @JsonSerialize(using = ToStringSerializer.class)
+    @JsonFormat(shape = JsonFormat.Shape.STRING)
     private long id;
     
     private String dataId;
@@ -45,8 +45,10 @@ public class ConfigInfoBase implements Serializable, Comparable<ConfigInfoBase> 
     
     private String md5;
     
-    public ConfigInfoBase() {
+    private String encryptedDataKey;
     
+    public ConfigInfoBase() {
+        
     }
     
     public ConfigInfoBase(String dataId, String group, String content) {
@@ -54,7 +56,7 @@ public class ConfigInfoBase implements Serializable, Comparable<ConfigInfoBase> 
         this.group = group;
         this.content = content;
         if (this.content != null) {
-            this.md5 = MD5Utils.md5Hex(this.content, Constants.ENCODE);
+            this.md5 = MD5Utils.md5Hex(this.content, Constants.PERSIST_ENCODE);
         }
     }
     
@@ -100,6 +102,14 @@ public class ConfigInfoBase implements Serializable, Comparable<ConfigInfoBase> 
     
     public void dump(PrintWriter writer) {
         writer.write(this.content);
+    }
+    
+    public String getEncryptedDataKey() {
+        return encryptedDataKey;
+    }
+    
+    public void setEncryptedDataKey(String encryptedDataKey) {
+        this.encryptedDataKey = encryptedDataKey;
     }
     
     @Override
@@ -161,17 +171,6 @@ public class ConfigInfoBase implements Serializable, Comparable<ConfigInfoBase> 
     }
     
     @Override
-    public int hashCode() {
-        final int prime = 31;
-        int result = 1;
-        result = prime * result + ((content == null) ? 0 : content.hashCode());
-        result = prime * result + ((dataId == null) ? 0 : dataId.hashCode());
-        result = prime * result + ((group == null) ? 0 : group.hashCode());
-        result = prime * result + ((md5 == null) ? 0 : md5.hashCode());
-        return result;
-    }
-    
-    @Override
     public boolean equals(Object obj) {
         if (this == obj) {
             return true;
@@ -215,8 +214,14 @@ public class ConfigInfoBase implements Serializable, Comparable<ConfigInfoBase> 
     }
     
     @Override
+    public int hashCode() {
+        return Objects.hash(dataId, group, content, md5);
+    }
+    
+    @Override
     public String toString() {
-        return "ConfigInfoBase{" + "id=" + id + ", dataId='" + dataId + '\'' + ", group='" + group + '\''
-                + ", content='" + content + '\'' + ", md5='" + md5 + '\'' + '}';
+        return "ConfigInfoBase{" + "id=" + id + ", dataId='" + dataId + '\'' + ", group='" + group
+            + '\''
+            + ", content='" + content + '\'' + ", md5='" + md5 + '\'' + '}';
     }
 }

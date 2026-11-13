@@ -20,6 +20,8 @@ import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.exception.runtime.NacosRuntimeException;
 import com.alibaba.nacos.common.utils.CollectionUtils;
 import com.alibaba.nacos.config.server.model.ConfigMetadata;
+import org.yaml.snakeyaml.DumperOptions;
+import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.constructor.AbstractConstruct;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
 import org.yaml.snakeyaml.introspector.Property;
@@ -44,24 +46,6 @@ import java.util.stream.Collectors;
  */
 public class YamlParserUtil {
     
-    private static Yaml yaml;
-    
-    static {
-        Representer representer = new Representer() {
-            
-            @Override
-            protected NodeTuple representJavaBeanProperty(Object javaBean, Property property, Object propertyValue,
-                    Tag customTag) {
-                if (propertyValue == null) {
-                    return null;
-                } else {
-                    return super.representJavaBeanProperty(javaBean, property, propertyValue, customTag);
-                }
-            }
-        };
-        yaml = new Yaml(new YamlParserConstructor(), representer);
-    }
-    
     /**
      * Serialize a Java object into a YAML string.
      *
@@ -69,7 +53,7 @@ public class YamlParserUtil {
      * @return YAML string.
      */
     public static String dumpObject(Object object) {
-        return yaml.dumpAsMap(object);
+        return new Yaml(new YamlParserConstructor(), new CustomRepresenter()).dumpAsMap(object);
     }
     
     /**
@@ -82,16 +66,35 @@ public class YamlParserUtil {
      * @return Java object.
      */
     public static <T> T loadObject(String content, Class<T> type) {
-        return yaml.loadAs(content, type);
+        return new Yaml(new YamlParserConstructor(), new CustomRepresenter()).loadAs(content, type);
     }
     
     public static class YamlParserConstructor extends SafeConstructor {
         
-        public static Tag configMetadataTag = new Tag(ConfigMetadata.class);
+        public static final Tag CONFIG_METADATA_TAG = new Tag(ConfigMetadata.class);
         
         public YamlParserConstructor() {
-            super();
-            yamlConstructors.put(configMetadataTag, new ConstructYamlConfigMetadata());
+            super(new LoaderOptions());
+            yamlConstructors.put(CONFIG_METADATA_TAG, new ConstructYamlConfigMetadata());
+        }
+    }
+    
+    public static class CustomRepresenter extends Representer {
+        
+        public CustomRepresenter() {
+            super(new DumperOptions());
+        }
+        
+        @Override
+        protected NodeTuple representJavaBeanProperty(Object javaBean, Property property,
+            Object propertyValue,
+            Tag customTag) {
+            if (propertyValue == null) {
+                return null;
+            } else {
+                return super.representJavaBeanProperty(javaBean, property, propertyValue,
+                    customTag);
+            }
         }
     }
     
@@ -99,9 +102,11 @@ public class YamlParserUtil {
         
         @Override
         public Object construct(Node node) {
-            if (!YamlParserConstructor.configMetadataTag.getValue().equals(node.getTag().getValue())) {
+            if (!YamlParserConstructor.CONFIG_METADATA_TAG.getValue()
+                .equals(node.getTag().getValue())) {
                 throw new NacosRuntimeException(NacosException.INVALID_PARAM,
-                        "could not determine a constructor for the tag " + node.getTag() + node.getStartMark());
+                    "could not determine a constructor for the tag " + node.getTag()
+                        + node.getStartMark());
             }
             
             MappingNode mNode = (MappingNode) node;
@@ -116,23 +121,26 @@ public class YamlParserUtil {
                 return configMetadata;
             }
             
-            List<ConfigMetadata.ConfigExportItem> exportItems = sequenceNode.getValue().stream().map(itemValue -> {
-                ConfigMetadata.ConfigExportItem configExportItem = new ConfigMetadata.ConfigExportItem();
-                MappingNode itemMap = (MappingNode) itemValue;
-                List<NodeTuple> propertyValues = itemMap.getValue();
-                Map<String, String> metadataMap = new HashMap<>(propertyValues.size());
-                propertyValues.forEach(metadata -> {
-                    ScalarNode keyNode = (ScalarNode) metadata.getKeyNode();
-                    ScalarNode valueNode = (ScalarNode) metadata.getValueNode();
-                    metadataMap.put(keyNode.getValue(), valueNode.getValue());
-                });
-                configExportItem.setDataId(metadataMap.get("dataId"));
-                configExportItem.setGroup(metadataMap.get("group"));
-                configExportItem.setType(metadataMap.get("type"));
-                configExportItem.setDesc(metadataMap.get("desc"));
-                configExportItem.setAppName(metadataMap.get("appName"));
-                return configExportItem;
-            }).collect(Collectors.toList());
+            List<ConfigMetadata.ConfigExportItem> exportItems =
+                sequenceNode.getValue().stream().map(itemValue -> {
+                    ConfigMetadata.ConfigExportItem configExportItem =
+                        new ConfigMetadata.ConfigExportItem();
+                    MappingNode itemMap = (MappingNode) itemValue;
+                    List<NodeTuple> propertyValues = itemMap.getValue();
+                    Map<String, String> metadataMap = new HashMap<>(propertyValues.size());
+                    propertyValues.forEach(metadata -> {
+                        ScalarNode keyNode = (ScalarNode) metadata.getKeyNode();
+                        ScalarNode valueNode = (ScalarNode) metadata.getValueNode();
+                        metadataMap.put(keyNode.getValue(), valueNode.getValue());
+                    });
+                    configExportItem.setDataId(metadataMap.get("dataId"));
+                    configExportItem.setGroup(metadataMap.get("group"));
+                    configExportItem.setType(metadataMap.get("type"));
+                    configExportItem.setDesc(metadataMap.get("desc"));
+                    configExportItem.setAppName(metadataMap.get("appName"));
+                    configExportItem.setConfigTags(metadataMap.get("configTags"));
+                    return configExportItem;
+                }).collect(Collectors.toList());
             
             configMetadata.setMetadata(exportItems);
             return configMetadata;

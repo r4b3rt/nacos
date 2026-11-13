@@ -29,7 +29,7 @@ import com.alibaba.nacos.naming.healthcheck.v2.processor.HealthCheckProcessorV2D
 import com.alibaba.nacos.naming.misc.Loggers;
 import com.alibaba.nacos.naming.misc.SwitchDomain;
 import com.alibaba.nacos.sys.utils.ApplicationUtils;
-import org.apache.commons.lang3.RandomUtils;
+import com.alibaba.nacos.common.utils.RandomUtils;
 
 import java.util.Optional;
 
@@ -42,13 +42,17 @@ import java.util.Optional;
  */
 public class HealthCheckTaskV2 extends AbstractExecuteTask implements NacosHealthCheckTask {
     
+    private static final int LOWER_CHECK_RT = 2000;
+    
+    private static final int UPPER_RANDOM_CHECK_RT = 5000;
+    
+    private static SwitchDomain switchDomain;
+    
+    private static NamingMetadataManager metadataManager;
+    
     private final IpPortBasedClient client;
     
     private final String taskId;
-    
-    private final SwitchDomain switchDomain;
-    
-    private final NamingMetadataManager metadataManager;
     
     private long checkRtNormalized = -1;
     
@@ -67,15 +71,29 @@ public class HealthCheckTaskV2 extends AbstractExecuteTask implements NacosHealt
     public HealthCheckTaskV2(IpPortBasedClient client) {
         this.client = client;
         this.taskId = client.getResponsibleId();
-        this.switchDomain = ApplicationUtils.getBean(SwitchDomain.class);
-        this.metadataManager = ApplicationUtils.getBean(NamingMetadataManager.class);
-        initCheckRT();
     }
     
-    private void initCheckRT() {
+    private void initIfNecessary() {
+        if (switchDomain == null) {
+            switchDomain = ApplicationUtils.getBean(SwitchDomain.class);
+        }
+        if (metadataManager == null) {
+            metadataManager = ApplicationUtils.getBean(NamingMetadataManager.class);
+        }
+        initCheckRt();
+    }
+    
+    private void initCheckRt() {
+        if (-1 != checkRtNormalized) {
+            return;
+        }
         // first check time delay
-        checkRtNormalized =
-                2000 + RandomUtils.nextInt(0, RandomUtils.nextInt(0, switchDomain.getTcpHealthParams().getMax()));
+        if (null != switchDomain) {
+            checkRtNormalized = LOWER_CHECK_RT + RandomUtils.nextInt(0,
+                RandomUtils.nextInt(0, switchDomain.getTcpHealthParams().getMax()));
+        } else {
+            checkRtNormalized = LOWER_CHECK_RT + RandomUtils.nextInt(0, UPPER_RANDOM_CHECK_RT);
+        }
         checkRtBest = Long.MAX_VALUE;
         checkRtWorst = 0L;
     }
@@ -92,20 +110,25 @@ public class HealthCheckTaskV2 extends AbstractExecuteTask implements NacosHealt
     @Override
     public void doHealthCheck() {
         try {
+            initIfNecessary();
             for (Service each : client.getAllPublishedService()) {
                 if (switchDomain.isHealthCheckEnabled(each.getGroupedServiceName())) {
                     InstancePublishInfo instancePublishInfo = client.getInstancePublishInfo(each);
                     ClusterMetadata metadata = getClusterMetadata(each, instancePublishInfo);
-                    ApplicationUtils.getBean(HealthCheckProcessorV2Delegate.class).process(this, each, metadata);
+                    ApplicationUtils.getBean(HealthCheckProcessorV2Delegate.class).process(this,
+                        each, metadata);
                     if (Loggers.EVT_LOG.isDebugEnabled()) {
-                        Loggers.EVT_LOG.debug("[HEALTH-CHECK-V2] schedule health check task: {}", client.getClientId());
+                        Loggers.EVT_LOG.debug("[HEALTH-CHECK] schedule health check task: {}",
+                            client.getClientId());
                     }
                 }
             }
         } catch (Throwable e) {
-            Loggers.SRV_LOG.error("[HEALTH-CHECK-V2] error while process health check for {}", client.getClientId(), e);
+            Loggers.SRV_LOG.error("[HEALTH-CHECK] error while process health check for {}",
+                client.getClientId(), e);
         } finally {
             if (!cancelled) {
+                initCheckRt();
                 HealthCheckReactor.scheduleCheck(this);
                 // worst == 0 means never checked
                 if (this.getCheckRtWorst() > 0) {
@@ -113,11 +136,14 @@ public class HealthCheckTaskV2 extends AbstractExecuteTask implements NacosHealt
                     long checkRtLastLast = getCheckRtLastLast();
                     this.setCheckRtLastLast(this.getCheckRtLast());
                     if (checkRtLastLast > 0) {
-                        long diff = ((this.getCheckRtLast() - this.getCheckRtLastLast()) * 10000) / checkRtLastLast;
+                        long diff = ((this.getCheckRtLast() - this.getCheckRtLastLast()) * 10000)
+                            / checkRtLastLast;
                         if (Loggers.CHECK_RT.isDebugEnabled()) {
-                            Loggers.CHECK_RT.debug("{}->normalized: {}, worst: {}, best: {}, last: {}, diff: {}",
-                                    client.getClientId(), this.getCheckRtNormalized(), this.getCheckRtWorst(),
-                                    this.getCheckRtBest(), this.getCheckRtLast(), diff);
+                            Loggers.CHECK_RT.debug(
+                                "{}->normalized: {}, worst: {}, best: {}, last: {}, diff: {}",
+                                client.getClientId(), this.getCheckRtNormalized(),
+                                this.getCheckRtWorst(),
+                                this.getCheckRtBest(), this.getCheckRtLast(), diff);
                         }
                     }
                 }
@@ -133,7 +159,12 @@ public class HealthCheckTaskV2 extends AbstractExecuteTask implements NacosHealt
     @Override
     public void afterIntercept() {
         if (!cancelled) {
-            HealthCheckReactor.scheduleCheck(this);
+            try {
+                initIfNecessary();
+            } finally {
+                initCheckRt();
+                HealthCheckReactor.scheduleCheck(this);
+            }
         }
     }
     
@@ -142,7 +173,8 @@ public class HealthCheckTaskV2 extends AbstractExecuteTask implements NacosHealt
         doHealthCheck();
     }
     
-    private ClusterMetadata getClusterMetadata(Service service, InstancePublishInfo instancePublishInfo) {
+    private ClusterMetadata getClusterMetadata(Service service,
+        InstancePublishInfo instancePublishInfo) {
         Optional<ServiceMetadata> serviceMetadata = metadataManager.getServiceMetadata(service);
         if (!serviceMetadata.isPresent()) {
             return new ClusterMetadata();

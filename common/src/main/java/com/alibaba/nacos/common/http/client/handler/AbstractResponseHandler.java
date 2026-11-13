@@ -20,7 +20,7 @@ import com.alibaba.nacos.common.http.HttpRestResult;
 import com.alibaba.nacos.common.http.client.response.HttpClientResponse;
 import com.alibaba.nacos.common.http.param.Header;
 import com.alibaba.nacos.common.utils.IoUtils;
-import org.apache.http.HttpStatus;
+import org.apache.hc.core5.http.HttpStatus;
 
 import java.lang.reflect.Type;
 
@@ -49,7 +49,7 @@ public abstract class AbstractResponseHandler<T> implements ResponseHandler<T> {
     private HttpRestResult<T> handleError(HttpClientResponse response) throws Exception {
         Header headers = response.getHeaders();
         String message = IoUtils.toString(response.getBody(), headers.getCharset());
-        return new HttpRestResult<T>(headers, response.getStatusCode(), null, message);
+        return new HttpRestResult<>(headers, response.getStatusCode(), null, message);
     }
     
     /**
@@ -60,6 +60,7 @@ public abstract class AbstractResponseHandler<T> implements ResponseHandler<T> {
      * @return HttpRestResult
      * @throws Exception ex
      */
-    public abstract HttpRestResult<T> convertResult(HttpClientResponse response, Type responseType) throws Exception;
+    public abstract HttpRestResult<T> convertResult(HttpClientResponse response, Type responseType)
+        throws Exception;
     
 }

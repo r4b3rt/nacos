@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2018 Alibaba Group Holding Ltd.
+ * Copyright 1999-2023 Alibaba Group Holding Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,8 @@
 
 package com.alibaba.nacos.api.config.remote.request;
 
+import com.alibaba.nacos.api.common.Constants;
+
 /**
  * request to query config content.
  *
@@ -24,15 +26,18 @@ package com.alibaba.nacos.api.config.remote.request;
  */
 public class ConfigQueryRequest extends AbstractConfigRequest {
     
-    private static final String NOTIFY_HEADER = "notify";
-    
-    private String dataId;
-    
-    private String group;
-    
-    private String tenant;
-    
     private String tag;
+    
+    /**
+     * Local cached MD5 of the configuration content.
+     *
+     * <p>Used for 304-based conditional GET. When set and matching the
+     * server-side MD5, the server returns 304 Not-Modified without content,
+     * reducing network bandwidth and server overhead.</p>
+     *
+     * @since 3.3.0
+     */
+    private String localMd5;
     
     /**
      * request builder.
@@ -48,60 +53,6 @@ public class ConfigQueryRequest extends AbstractConfigRequest {
         request.setGroup(group);
         request.setTenant(tenant);
         return request;
-    }
-    
-    /**
-     * Getter method for property <tt>dataId</tt>.
-     *
-     * @return property value of dataId
-     */
-    public String getDataId() {
-        return dataId;
-    }
-    
-    /**
-     * Setter method for property <tt>dataId</tt>.
-     *
-     * @param dataId value to be assigned to property dataId
-     */
-    public void setDataId(String dataId) {
-        this.dataId = dataId;
-    }
-    
-    /**
-     * Getter method for property <tt>group</tt>.
-     *
-     * @return property value of group
-     */
-    public String getGroup() {
-        return group;
-    }
-    
-    /**
-     * Setter method for property <tt>group</tt>.
-     *
-     * @param group value to be assigned to property group
-     */
-    public void setGroup(String group) {
-        this.group = group;
-    }
-    
-    /**
-     * Getter method for property <tt>tenant</tt>.
-     *
-     * @return property value of tenant
-     */
-    public String getTenant() {
-        return tenant;
-    }
-    
-    /**
-     * Setter method for property <tt>tenant</tt>.
-     *
-     * @param tenant value to be assigned to property tenant
-     */
-    public void setTenant(String tenant) {
-        this.tenant = tenant;
     }
     
     /**
@@ -122,8 +73,28 @@ public class ConfigQueryRequest extends AbstractConfigRequest {
         this.tag = tag;
     }
     
+    /**
+     * Getter method for property <tt>localMd5</tt>.
+     *
+     * @return property value of localMd5
+     * @since 3.3.0
+     */
+    public String getLocalMd5() {
+        return localMd5;
+    }
+    
+    /**
+     * Setter method for property <tt>localMd5</tt>.
+     *
+     * @param localMd5 value to be assigned to property localMd5
+     * @since 3.3.0
+     */
+    public void setLocalMd5(String localMd5) {
+        this.localMd5 = localMd5;
+    }
+    
     public boolean isNotify() {
-        String notify = getHeader(NOTIFY_HEADER, Boolean.FALSE.toString());
+        String notify = getHeader(Constants.Config.NOTIFY_HEADER, Boolean.FALSE.toString());
         return Boolean.parseBoolean(notify);
     }
 }

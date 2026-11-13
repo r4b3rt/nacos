@@ -18,17 +18,27 @@ package com.alibaba.nacos.core.code;
 
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.exception.runtime.NacosRuntimeException;
+import com.alibaba.nacos.common.packagescan.DefaultPackageScan;
+import com.alibaba.nacos.common.utils.ArrayUtils;
 import com.alibaba.nacos.common.utils.CollectionUtils;
-import com.alibaba.nacos.core.auth.RequestMappingInfo;
-import com.alibaba.nacos.core.auth.RequestMappingInfo.RequestMappingInfoComparator;
-import com.alibaba.nacos.core.auth.condition.ParamRequestCondition;
-import com.alibaba.nacos.core.auth.condition.PathRequestCondition;
+import com.alibaba.nacos.common.utils.StringUtils;
+import com.alibaba.nacos.core.code.RequestMappingInfo.RequestMappingInfoComparator;
+import com.alibaba.nacos.core.code.condition.ParamRequestCondition;
+import com.alibaba.nacos.core.code.condition.PathRequestCondition;
 import com.alibaba.nacos.sys.env.EnvUtil;
-import org.apache.commons.lang3.ArrayUtils;
-import org.reflections.Reflections;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
+import org.springframework.web.servlet.HandlerExecutionChain;
+import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.context.support.WebApplicationContextUtils;
+import org.springframework.web.util.ServletRequestPathUtils;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -37,18 +47,17 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 
-import javax.servlet.http.HttpServletRequest;
 import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 import static com.alibaba.nacos.sys.env.Constants.REQUEST_PATH_SEPARATOR;
-
 
 /**
  * Method cache.
@@ -59,16 +68,116 @@ import static com.alibaba.nacos.sys.env.Constants.REQUEST_PATH_SEPARATOR;
 @Component
 public class ControllerMethodsCache {
     
+    public static final String LEGACY_RESOLVER_ENABLED =
+        "nacos.core.auth.controller-method-cache.legacy-enabled";
+    
+    private static final String MVC_HANDLER_MAPPING_BEAN_NAME = "requestMappingHandlerMapping";
+    
     private static final Logger LOGGER = LoggerFactory.getLogger(ControllerMethodsCache.class);
     
     private ConcurrentMap<RequestMappingInfo, Method> methods = new ConcurrentHashMap<>();
     
-    private final ConcurrentMap<String, List<RequestMappingInfo>> urlLookup = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, List<RequestMappingInfo>> urlLookup =
+        new ConcurrentHashMap<>();
+    
+    private final Set<Class> scannedClass = new HashSet<>();
+    
+    private final ObjectProvider<RequestMappingHandlerMapping> handlerMappingProvider;
+    
+    /**
+     * Create a controller method resolver backed by Spring MVC's handler mapping.
+     *
+     * @param handlerMappingProvider lazy provider used to avoid controller initialization cycles
+     */
+    @Autowired
+    public ControllerMethodsCache(
+        ObjectProvider<RequestMappingHandlerMapping> handlerMappingProvider) {
+        this.handlerMappingProvider = handlerMappingProvider;
+    }
+    
+    /**
+     * Create a resolver using the legacy annotation cache.
+     *
+     * @deprecated since 3.3.0, only retained for tests and compatibility and will be removed in
+     *     3.4.0. Use Spring MVC handler mapping.
+     */
+    @Deprecated(since = "3.3.0", forRemoval = true)
+    public ControllerMethodsCache() {
+        this.handlerMappingProvider = null;
+    }
     
     public Method getMethod(HttpServletRequest request) {
+        if (handlerMappingProvider != null && !isLegacyResolverEnabled()) {
+            return getMethodFromHandlerMapping(request);
+        }
+        return getMethodFromLegacyCache(request);
+    }
+    
+    private boolean isLegacyResolverEnabled() {
+        String systemProperty = System.getProperty(LEGACY_RESOLVER_ENABLED);
+        if (systemProperty != null) {
+            return Boolean.parseBoolean(systemProperty);
+        }
+        return EnvUtil.getProperty(LEGACY_RESOLVER_ENABLED, Boolean.class, false);
+    }
+    
+    private Method getMethodFromHandlerMapping(HttpServletRequest request) {
+        RequestMappingHandlerMapping handlerMapping = resolveHandlerMapping(request);
+        if (handlerMapping == null) {
+            throw new NacosRuntimeException(NacosException.SERVER_ERROR,
+                "Spring MVC RequestMappingHandlerMapping is unavailable");
+        }
+        boolean parsedRequestPath = false;
+        try {
+            if (handlerMapping.usesPathPatterns()
+                && !ServletRequestPathUtils.hasParsedRequestPath(request)) {
+                ServletRequestPathUtils.parseAndCache(request);
+                parsedRequestPath = true;
+            }
+            HandlerExecutionChain handler = handlerMapping.getHandler(request);
+            if (handler == null || !(handler.getHandler() instanceof HandlerMethod)) {
+                return null;
+            }
+            return ((HandlerMethod) handler.getHandler()).getMethod();
+        } catch (HttpRequestMethodNotSupportedException e) {
+            // No business handler exists. Let MVC produce its normal 405 response.
+            return null;
+        } catch (Exception e) {
+            throw new NacosRuntimeException(NacosException.SERVER_ERROR,
+                "Failed to resolve Spring MVC controller method", e);
+        } finally {
+            if (parsedRequestPath) {
+                ServletRequestPathUtils.clearParsedRequestPath(request);
+            }
+        }
+    }
+    
+    private RequestMappingHandlerMapping resolveHandlerMapping(HttpServletRequest request) {
+        WebApplicationContext webApplicationContext =
+            WebApplicationContextUtils.getWebApplicationContext(request.getServletContext());
+        if (webApplicationContext != null
+            && webApplicationContext.containsBean(MVC_HANDLER_MAPPING_BEAN_NAME)) {
+            return webApplicationContext.getBean(MVC_HANDLER_MAPPING_BEAN_NAME,
+                RequestMappingHandlerMapping.class);
+        }
+        return handlerMappingProvider.getIfUnique();
+    }
+    
+    /**
+     * Resolve a method with the original Nacos-maintained annotation cache.
+     *
+     * @deprecated since 3.3.0, use Spring MVC handler mapping so authorization and dispatch share
+     *     one resolver. This legacy resolver will be removed in 3.4.0.
+     */
+    @Deprecated(since = "3.3.0", forRemoval = true)
+    private Method getMethodFromLegacyCache(HttpServletRequest request) {
         String path = getPath(request);
         String httpMethod = request.getMethod();
-        String urlKey = httpMethod + REQUEST_PATH_SEPARATOR + path.replaceFirst(EnvUtil.getContextPath(), "");
+        if (RequestMethod.HEAD.name().equals(httpMethod)) {
+            httpMethod = RequestMethod.GET.name();
+        }
+        String urlKey = httpMethod + REQUEST_PATH_SEPARATOR
+            + stripContextPath(path, resolveContextPath(request));
         List<RequestMappingInfo> requestMappingInfos = urlLookup.get(urlKey);
         if (CollectionUtils.isEmpty(requestMappingInfos)) {
             return null;
@@ -85,16 +194,39 @@ public class ControllerMethodsCache {
             RequestMappingInfo secondBestMatch = matchedInfo.get(1);
             if (comparator.compare(bestMatch, secondBestMatch) == 0) {
                 throw new IllegalStateException(
-                        "Ambiguous methods mapped for '" + request.getRequestURI() + "': {" + bestMatch + ", "
-                                + secondBestMatch + "}");
+                    "Ambiguous methods mapped for '" + request.getRequestURI() + "': {" + bestMatch
+                        + ", "
+                        + secondBestMatch + "}");
             }
         }
         return methods.get(bestMatch);
     }
     
+    private String resolveContextPath(HttpServletRequest request) {
+        String requestContextPath = request.getContextPath();
+        String contextPath = StringUtils.isEmpty(requestContextPath) ? EnvUtil.getContextPath()
+            : requestContextPath;
+        return StringUtils.isEmpty(contextPath) ? contextPath : getPath(contextPath);
+    }
+    
+    private String stripContextPath(String path, String contextPath) {
+        if (StringUtils.isEmpty(path) || StringUtils.isEmpty(contextPath)) {
+            return path;
+        }
+        if (path.startsWith(contextPath)) {
+            String stripped = path.substring(contextPath.length());
+            return StringUtils.isEmpty(stripped) ? StringUtils.EMPTY : stripped;
+        }
+        return path;
+    }
+    
     private String getPath(HttpServletRequest request) {
+        return getPath(request.getRequestURI());
+    }
+    
+    private String getPath(String uri) {
         try {
-            return new URI(request.getRequestURI()).getPath();
+            return new URI(uri).getPath();
         } catch (URISyntaxException e) {
             LOGGER.error("parse request to path error", e);
             throw new NacosRuntimeException(NacosException.NOT_FOUND, "Invalid URI");
@@ -102,11 +234,11 @@ public class ControllerMethodsCache {
     }
     
     private List<RequestMappingInfo> findMatchedInfo(List<RequestMappingInfo> requestMappingInfos,
-            HttpServletRequest request) {
+        HttpServletRequest request) {
         List<RequestMappingInfo> matchedInfo = new ArrayList<>();
         for (RequestMappingInfo requestMappingInfo : requestMappingInfos) {
             ParamRequestCondition matchingCondition = requestMappingInfo.getParamRequestCondition()
-                    .getMatchingCondition(request);
+                .getMatchingCondition(request);
             if (matchingCondition != null) {
                 matchedInfo.add(requestMappingInfo);
             }
@@ -120,9 +252,9 @@ public class ControllerMethodsCache {
      * @param packageName package name
      */
     public void initClassMethod(String packageName) {
-        Reflections reflections = new Reflections(packageName);
-        Set<Class<?>> classesList = reflections.getTypesAnnotatedWith(RequestMapping.class);
-        
+        DefaultPackageScan packageScan = new DefaultPackageScan();
+        Set<Class<Object>> classesList =
+            packageScan.getTypesAnnotatedWith(packageName, RequestMapping.class);
         for (Class clazz : classesList) {
             initClassMethod(clazz);
         }
@@ -145,6 +277,9 @@ public class ControllerMethodsCache {
      * @param clazz {@link Class}
      */
     private void initClassMethod(Class<?> clazz) {
+        if (scannedClass.contains(clazz)) {
+            return;
+        }
         RequestMapping requestMapping = clazz.getAnnotation(RequestMapping.class);
         for (String classPath : requestMapping.value()) {
             for (Method method : clazz.getMethods()) {
@@ -158,12 +293,23 @@ public class ControllerMethodsCache {
                     requestMethods = new RequestMethod[1];
                     requestMethods[0] = RequestMethod.GET;
                 }
-                for (String methodPath : requestMapping.value()) {
-                    String urlKey = requestMethods[0].name() + REQUEST_PATH_SEPARATOR + classPath + methodPath;
-                    addUrlAndMethodRelation(urlKey, requestMapping.params(), method);
+                // FIXME: vipserver needs multiple http methods mapping
+                for (RequestMethod requestMethod : requestMethods) {
+                    String[] value = requestMapping.value();
+                    if (value.length > 0) {
+                        for (String methodPath : requestMapping.value()) {
+                            String urlKey = requestMethod.name() + REQUEST_PATH_SEPARATOR
+                                + classPath + methodPath;
+                            addUrlAndMethodRelation(urlKey, requestMapping.params(), method);
+                        }
+                    } else {
+                        String urlKey = requestMethod.name() + REQUEST_PATH_SEPARATOR + classPath;
+                        addUrlAndMethodRelation(urlKey, requestMapping.params(), method);
+                    }
                 }
             }
         }
+        scannedClass.add(clazz);
     }
     
     private void parseSubAnnotations(Method method, String classPath) {
@@ -187,17 +333,20 @@ public class ControllerMethodsCache {
         }
         
         if (deleteMapping != null) {
-            put(RequestMethod.DELETE, classPath, deleteMapping.value(), deleteMapping.params(), method);
+            put(RequestMethod.DELETE, classPath, deleteMapping.value(), deleteMapping.params(),
+                method);
         }
         
         if (patchMapping != null) {
-            put(RequestMethod.PATCH, classPath, patchMapping.value(), patchMapping.params(), method);
+            put(RequestMethod.PATCH, classPath, patchMapping.value(), patchMapping.params(),
+                method);
         }
         
     }
     
-    private void put(RequestMethod requestMethod, String classPath, String[] requestPaths, String[] requestParams,
-            Method method) {
+    private void put(RequestMethod requestMethod, String classPath, String[] requestPaths,
+        String[] requestParams,
+        Method method) {
         if (ArrayUtils.isEmpty(requestPaths)) {
             String urlKey = requestMethod.name() + REQUEST_PATH_SEPARATOR + classPath;
             addUrlAndMethodRelation(urlKey, requestParams, method);
@@ -213,14 +362,10 @@ public class ControllerMethodsCache {
         RequestMappingInfo requestMappingInfo = new RequestMappingInfo();
         requestMappingInfo.setPathRequestCondition(new PathRequestCondition(urlKey));
         requestMappingInfo.setParamRequestCondition(new ParamRequestCondition(requestParam));
-        List<RequestMappingInfo> requestMappingInfos = urlLookup.get(urlKey);
-        if (requestMappingInfos == null) {
-            urlLookup.putIfAbsent(urlKey, new ArrayList<>());
-            requestMappingInfos = urlLookup.get(urlKey);
-            // For issue #4701.
-            String urlKeyBackup = urlKey + "/";
-            urlLookup.putIfAbsent(urlKeyBackup, requestMappingInfos);
-        }
+        List<RequestMappingInfo> requestMappingInfos =
+            urlLookup.computeIfAbsent(urlKey, k -> new ArrayList<>());
+        // For issue #4701.
+        urlLookup.computeIfAbsent(urlKey + "/", k -> requestMappingInfos);
         requestMappingInfos.add(requestMappingInfo);
         methods.put(requestMappingInfo, method);
     }

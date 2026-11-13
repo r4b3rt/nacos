@@ -66,7 +66,7 @@ class ConfigDetail extends React.Component {
     this.group = getParams('group') || 'DEFAULT_GROUP';
     this.ips = '';
     this.valueMap = {}; // 存储不同版本的数据
-    this.tenant = getParams('namespace') || '';
+    this.namespaceId = getParams('namespace') || 'public';
     this.searchDataId = getParams('searchDataId') || '';
     this.searchGroup = getParams('searchGroup') || '';
     this.pageSize = getParams('pageSize');
@@ -147,24 +147,24 @@ class ConfigDetail extends React.Component {
     const { locale = {} } = this.props;
     const self = this;
     this.serverId = getParams('serverId') || 'center';
-    this.tenant = getParams('namespace') || '';
+    this.namespaceId = getParams('namespace') || 'public';
     this.edasAppName = getParams('edasAppName') || '';
     this.inApp = this.edasAppName;
-    const url = `v1/cs/configs?show=all&dataId=${this.dataId}&group=${this.group}`;
+    const url = `v3/console/cs/config?&dataId=${this.dataId}&groupName=${this.group}`;
     request({
       url,
       beforeSend() {
         self.openLoading();
       },
       success(result) {
-        if (result != null) {
-          const data = result;
+        if (result != null && result.code === 0) {
+          const { data } = result;
           self.valueMap.normal = data;
           self.field.setValue('dataId', data.dataId);
           self.field.setValue('content', data.content);
           self.field.setValue('appName', self.inApp ? self.edasAppName : data.appName);
           self.field.setValue('envs', self.serverId);
-          self.field.setValue('group', data.group);
+          self.field.setValue('group', data.groupName);
           self.field.setValue('config_tags', data.configTags);
           self.field.setValue('desc', data.desc);
           self.field.setValue('md5', data.md5);
@@ -186,7 +186,7 @@ class ConfigDetail extends React.Component {
         serverId: this.serverId,
         group: this.searchGroup,
         dataId: this.searchDataId,
-        namespace: this.tenant,
+        namespace: this.namespaceId,
         pageNo: this.pageNo,
         pageSize: this.pageSize,
       })
@@ -205,7 +205,7 @@ class ConfigDetail extends React.Component {
       roundedSelection: false,
       readOnly: true,
       lineNumbersMinChars: true,
-      theme: 'vs-dark',
+      theme: 'vs-dark-enhanced',
       wordWrapColumn: 120,
       folding: false,
       showFoldingControls: 'always',
@@ -226,20 +226,20 @@ class ConfigDetail extends React.Component {
     let self = this;
     const { locale = {} } = this.props;
     let leftvalue = this.monacoEditor.getValue();
-    let url = `v1/cs/history/previous?id=${this.valueMap.normal.id}`;
+    let url = `v3/console/cs/history/previous?id=${this.valueMap.normal.id}&dataId=${this.dataId}&groupName=${this.group}`;
     request({
       url,
       beforeSend() {
         self.openLoading();
       },
       success(result) {
-        if (result != null) {
-          let rightvalue = result.content;
+        if (result.code === 0 && result.data != null) {
+          let rightvalue = result.data.content;
           leftvalue = leftvalue.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
           rightvalue = rightvalue.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
           self.diffEditorDialog.current.getInstance().openDialog(leftvalue, rightvalue);
         } else {
-          Dialog.alert({ title: locale.error, content: result.message });
+          Dialog.alert({ title: locale.error, content: locale.configNotFind });
         }
       },
       complete() {
@@ -248,19 +248,19 @@ class ConfigDetail extends React.Component {
     });
   }
 
-  openCompare = ([dataId, group, tenant]) => {
+  openCompare = ([dataId, group, namespaceId]) => {
     let self = this;
     const { locale = {} } = this.props;
     let leftvalue = this.monacoEditor.getValue();
     const params = {
-      show: 'all',
-      group,
+      // show: 'all',
+      groupName: group,
       dataId,
-      tenant,
+      namespaceId,
     };
-    requestUtils.get('v1/cs/configs', { params }).then(res => {
-      if (res != null && res !== '') {
-        let rightvalue = res.content;
+    requestUtils.get('v3/console/cs/config', { params }).then(res => {
+      if (res.code === 0 && res.data != null && res.data !== '') {
+        let rightvalue = res.data.content;
         leftvalue = leftvalue.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
         rightvalue = rightvalue.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
         self.compareEditorDialog.current.getInstance().openDialog(leftvalue, rightvalue);
@@ -292,7 +292,7 @@ class ConfigDetail extends React.Component {
     };
     const activeKey = this.state.activeKey.split('-')[0];
     return (
-      <div style={{ padding: 10 }}>
+      <div>
         <Loading
           shape={'flower'}
           tip={'Loading...'}
@@ -317,31 +317,37 @@ class ConfigDetail extends React.Component {
           ) : (
             ''
           )}
-          <Form inline={false} field={this.field}>
-            <FormItem label={'Data ID:'} required {...formItemLayout}>
+          <Form inline={false} field={this.field} {...formItemLayout}>
+            <FormItem label={locale.namespace} required>
+              <p>{this.namespaceId}</p>
+            </FormItem>
+            <FormItem label={'Data ID'} required>
               <Input htmlType={'text'} readOnly {...init('dataId')} />
             </FormItem>
-            <FormItem label={'Group:'} required {...formItemLayout}>
+            <FormItem label={'Group'} required>
               <Input htmlType={'text'} readOnly {...init('group')} />
             </FormItem>
-            <div style={{ marginTop: 10 }}>
-              <a style={{ fontSize: '12px' }} onClick={this.toggleMore.bind(this)}>
-                {this.state.showmore ? locale.collapse : locale.more}
-              </a>
-            </div>
-            {this.state.showmore ? (
+            <FormItem label=" ">
               <div>
-                <FormItem label={locale.home} {...formItemLayout}>
-                  <Input htmlType={'text'} readOnly {...init('appName')} />
-                </FormItem>
-
-                <FormItem label={locale.tags} {...formItemLayout}>
-                  <Input htmlType={'text'} readOnly {...init('config_tags')} />
-                </FormItem>
+                <a style={{ fontSize: '12px' }} onClick={this.toggleMore.bind(this)}>
+                  {this.state.showmore ? locale.collapse : locale.more}
+                </a>
               </div>
-            ) : (
-              ''
-            )}
+            </FormItem>
+
+            <FormItem
+              label={locale.home}
+              className={`more-item${!this.state.showmore ? ' hide' : ''}`}
+            >
+              <Input htmlType={'text'} readOnly {...init('appName')} />
+            </FormItem>
+
+            <FormItem
+              label={locale.tags}
+              className={`more-item${!this.state.showmore ? ' hide' : ''}`}
+            >
+              <Input htmlType={'text'} readOnly {...init('config_tags')} />
+            </FormItem>
 
             <FormItem label={locale.description} {...formItemLayout}>
               <Input.TextArea htmlType={'text'} multiple rows={3} readOnly {...init('desc')} />
@@ -349,7 +355,7 @@ class ConfigDetail extends React.Component {
             {activeKey === 'normal' ? (
               ''
             ) : (
-              <FormItem label={locale.betaRelease} {...formItemLayout}>
+              <FormItem label={locale.betaRelease}>
                 <div style={{ width: '100%' }} id={'betaips'}>
                   <Input.TextArea
                     multiple
@@ -361,22 +367,22 @@ class ConfigDetail extends React.Component {
                 </div>
               </FormItem>
             )}
-            <FormItem label={'MD5:'} required {...formItemLayout}>
+            <FormItem label={'MD5:'} required>
               <Input htmlType={'text'} readOnly {...init('md5')} />
             </FormItem>
-            <FormItem label={locale.configuration} required {...formItemLayout}>
-              <div className={editorClass} id="container" />
+            <FormItem label={locale.configuration} required>
+              <div className={editorClass} id="container" style={{ minHeight: 500 }} />
             </FormItem>
           </Form>
           <Row>
             <Col span="24" className="button-list">
-              <Button size="large" type="primary" onClick={() => this.onClickConfigCompare()}>
+              <Button type="primary" onClick={() => this.onClickConfigCompare()}>
                 {locale.configComparison}
               </Button>{' '}
-              <Button size="large" type="primary" onClick={this.openDiff.bind(this)}>
+              <Button type="primary" onClick={this.openDiff.bind(this)}>
                 {locale.versionComparison}
               </Button>{' '}
-              <Button size="large" type="normal" onClick={this.goList.bind(this)}>
+              <Button type="normal" onClick={this.goList.bind(this)}>
                 {locale.back}
               </Button>
             </Col>

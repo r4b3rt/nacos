@@ -16,6 +16,8 @@
 
 package com.alibaba.nacos.api.remote.request;
 
+import static com.alibaba.nacos.api.common.Constants.Remote.INTERNAL_MODULE;
+
 /**
  * ConnectResetRequest.
  *
@@ -24,15 +26,33 @@ package com.alibaba.nacos.api.remote.request;
  */
 public class ConnectResetRequest extends ServerRequest {
     
-    private static final String MODULE = "internal";
-    
     String serverIp;
     
     String serverPort;
     
+    String connectionId;
+    
     @Override
     public String getModule() {
-        return MODULE;
+        return INTERNAL_MODULE;
+    }
+    
+    /**
+     * Getter method for property <tt>connectionId</tt>.
+     *
+     * @return property value of connectionId
+     */
+    public String getConnectionId() {
+        return connectionId;
+    }
+    
+    /**
+     * Setter method for property <tt>connectionId</tt>.
+     *
+     * @param connectionId value to be assigned to property connectionId
+     */
+    public void setConnectionId(String connectionId) {
+        this.connectionId = connectionId;
     }
     
     /**

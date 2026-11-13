@@ -16,7 +16,7 @@
 
 package com.alibaba.nacos.config.server.utils;
 
-import org.apache.commons.lang3.StringUtils;
+import com.alibaba.nacos.common.utils.StringUtils;
 
 /**
  * Group key util.
@@ -89,7 +89,7 @@ public class GroupKey2 {
         if (group.length() == 0) {
             throw new IllegalArgumentException("invalid groupkey:" + groupKey);
         }
-    
+        
         return new String[] {dataId, group, tenant};
     }
     

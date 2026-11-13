@@ -47,10 +47,10 @@ import com.alipay.sofa.jraft.error.RaftException;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotReader;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotWriter;
 import com.google.protobuf.Message;
-import org.apache.commons.lang3.BooleanUtils;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -88,7 +88,7 @@ class NacosStateMachine extends StateMachineAdapter {
         this.server = server;
         this.processor = processor;
         this.groupId = processor.group();
-        adapterToJRaftSnapshot(processor.loadSnapshotOperate());
+        adapterToJraftSnapshot(processor.loadSnapshotOperate());
     }
     
     @Override
@@ -107,6 +107,13 @@ class NacosStateMachine extends StateMachineAdapter {
                     } else {
                         final ByteBuffer data = iter.getData();
                         message = ProtoMessageUtil.parse(data.array());
+                        if (message instanceof ReadRequest) {
+                            //'iter.done() == null' means current node is follower, ignore read operation
+                            applied++;
+                            index++;
+                            iter.next();
+                            continue;
+                        }
                     }
                     
                     LoggerUtils.printIfDebugEnabled(Loggers.RAFT, "receive log : {}", message);
@@ -134,10 +141,11 @@ class NacosStateMachine extends StateMachineAdapter {
                 iter.next();
             }
         } catch (Throwable t) {
-            Loggers.RAFT.error("processor : {}, stateMachine meet critical error: {}.", processor, t);
+            Loggers.RAFT.error("processor : {}, stateMachine meet critical error: {}.", processor,
+                t);
             iter.setErrorAndRollback(index - applied,
-                    new Status(RaftError.ESTATEMACHINE, "StateMachine meet critical error: %s.",
-                            ExceptionUtil.getStackTrace(t)));
+                new Status(RaftError.ESTATEMACHINE, "StateMachine meet critical error: %s.",
+                    ExceptionUtil.getStackTrace(t)));
         }
     }
     
@@ -151,8 +159,9 @@ class NacosStateMachine extends StateMachineAdapter {
             try {
                 operation.onSnapshotSave(writer, done);
             } catch (Throwable t) {
-                Loggers.RAFT.error("There was an error saving the snapshot , error : {}, operation : {}", t,
-                        operation.info());
+                Loggers.RAFT.error(
+                    "There was an error saving the snapshot , error : {}, operation : {}", t,
+                    operation.info());
                 throw t;
             }
         }
@@ -167,7 +176,8 @@ class NacosStateMachine extends StateMachineAdapter {
                     return false;
                 }
             } catch (Throwable t) {
-                Loggers.RAFT.error("Snapshot load failed on : {}, has error : {}", operation.info(), t);
+                Loggers.RAFT.error("Snapshot load failed on : {}, has error : {}", operation.info(),
+                    t);
                 return false;
             }
         }
@@ -181,7 +191,8 @@ class NacosStateMachine extends StateMachineAdapter {
         this.isLeader.set(true);
         this.leaderIp = node.getNodeId().getPeerId().getEndpoint().toString();
         NotifyCenter.publishEvent(
-                RaftEvent.builder().groupId(groupId).leader(leaderIp).term(term).raftClusterInfo(allPeers()).build());
+            RaftEvent.builder().groupId(groupId).leader(leaderIp).term(term)
+                .raftClusterInfo(allPeers()).build());
     }
     
     @Override
@@ -195,14 +206,16 @@ class NacosStateMachine extends StateMachineAdapter {
         this.term = ctx.getTerm();
         this.leaderIp = ctx.getLeaderId().getEndpoint().toString();
         NotifyCenter.publishEvent(
-                RaftEvent.builder().groupId(groupId).leader(leaderIp).term(ctx.getTerm()).raftClusterInfo(allPeers())
-                        .build());
+            RaftEvent.builder().groupId(groupId).leader(leaderIp).term(ctx.getTerm())
+                .raftClusterInfo(allPeers())
+                .build());
     }
     
     @Override
     public void onConfigurationCommitted(Configuration conf) {
         NotifyCenter.publishEvent(
-                RaftEvent.builder().groupId(groupId).raftClusterInfo(JRaftUtils.toStrings(conf.getPeers())).build());
+            RaftEvent.builder().groupId(groupId)
+                .raftClusterInfo(JRaftUtils.toStrings(conf.getPeers())).build());
     }
     
     @Override
@@ -210,9 +223,10 @@ class NacosStateMachine extends StateMachineAdapter {
         super.onError(e);
         processor.onError(e);
         NotifyCenter.publishEvent(
-                RaftEvent.builder().groupId(groupId).leader(leaderIp).term(term).raftClusterInfo(allPeers())
-                        .errMsg(e.toString())
-                        .build());
+            RaftEvent.builder().groupId(groupId).leader(leaderIp).term(term)
+                .raftClusterInfo(allPeers())
+                .errMsg(e.toString())
+                .build());
     }
     
     public boolean isLeader() {
@@ -228,7 +242,8 @@ class NacosStateMachine extends StateMachineAdapter {
             return JRaftUtils.toStrings(node.listPeers());
         }
         
-        return JRaftUtils.toStrings(RouteTable.getInstance().getConfiguration(node.getGroupId()).getPeers());
+        return JRaftUtils
+            .toStrings(RouteTable.getInstance().getConfiguration(node.getGroupId()).getPeers());
     }
     
     private void postProcessor(Response data, NacosClosure closure) {
@@ -241,7 +256,7 @@ class NacosStateMachine extends StateMachineAdapter {
         return term;
     }
     
-    private void adapterToJRaftSnapshot(Collection<SnapshotOperation> userOperates) {
+    private void adapterToJraftSnapshot(Collection<SnapshotOperation> userOperates) {
         List<JSnapshotOperation> tmp = new ArrayList<>();
         
         for (SnapshotOperation item : userOperates) {
@@ -261,7 +276,7 @@ class NacosStateMachine extends StateMachineAdapter {
                     // components from implementing snapshots
                     
                     final BiConsumer<Boolean, Throwable> callFinally = (result, t) -> {
-                        boolean[] results = new boolean[wCtx.listFiles().size()];
+                        Boolean[] results = new Boolean[wCtx.listFiles().size()];
                         int[] index = new int[] {0};
                         wCtx.listFiles().forEach((file, meta) -> {
                             try {
@@ -270,9 +285,11 @@ class NacosStateMachine extends StateMachineAdapter {
                                 throw new ConsistencyException(e);
                             }
                         });
-                        final Status status = result && BooleanUtils.and(results) ? Status.OK()
-                                : new Status(RaftError.EIO, "Fail to compress snapshot at %s, error is %s",
-                                        writer.getPath(), t == null ? "" : t.getMessage());
+                        final Status status = result
+                            && Arrays.stream(results).allMatch(Boolean.TRUE::equals) ? Status.OK()
+                                : new Status(RaftError.EIO,
+                                    "Fail to compress snapshot at %s, error is %s",
+                                    writer.getPath(), t == null ? "" : t.getMessage());
                         done.run(status);
                     };
                     item.onSnapshotSave(wCtx, callFinally);
@@ -280,9 +297,11 @@ class NacosStateMachine extends StateMachineAdapter {
                 
                 @Override
                 public boolean onSnapshotLoad(SnapshotReader reader) {
-                    final Map<String, LocalFileMeta> metaMap = new HashMap<>(reader.listFiles().size());
+                    final Map<String, LocalFileMeta> metaMap =
+                        new HashMap<>(reader.listFiles().size());
                     for (String fileName : reader.listFiles()) {
-                        final LocalFileMetaOutter.LocalFileMeta meta = (LocalFileMetaOutter.LocalFileMeta) reader
+                        final LocalFileMetaOutter.LocalFileMeta meta =
+                            (LocalFileMetaOutter.LocalFileMeta) reader
                                 .getFileMeta(fileName);
                         
                         byte[] bytes = meta.getUserMeta().toByteArray();

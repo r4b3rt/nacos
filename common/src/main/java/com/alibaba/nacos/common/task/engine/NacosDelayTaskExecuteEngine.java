@@ -51,20 +51,15 @@ public class NacosDelayTaskExecuteEngine extends AbstractNacosTaskExecuteEngine<
         this(name, 32, logger, 100L);
     }
     
-    public NacosDelayTaskExecuteEngine(String name, Logger logger, long processInterval) {
-        this(name, 32, logger, processInterval);
-    }
-    
-    public NacosDelayTaskExecuteEngine(String name, int initCapacity, Logger logger) {
-        this(name, initCapacity, logger, 100L);
-    }
-    
-    public NacosDelayTaskExecuteEngine(String name, int initCapacity, Logger logger, long processInterval) {
+    public NacosDelayTaskExecuteEngine(String name, int initCapacity, Logger logger,
+        long processInterval) {
         super(logger);
         tasks = new ConcurrentHashMap<>(initCapacity);
-        processingExecutor = ExecutorFactory.newSingleScheduledExecutorService(new NameThreadFactory(name));
+        processingExecutor =
+            ExecutorFactory.newSingleScheduledExecutorService(new NameThreadFactory(name));
         processingExecutor
-                .scheduleWithFixedDelay(new ProcessRunnable(), processInterval, processInterval, TimeUnit.MILLISECONDS);
+            .scheduleWithFixedDelay(new ProcessRunnable(), processInterval, processInterval,
+                TimeUnit.MILLISECONDS);
     }
     
     @Override
@@ -104,7 +99,7 @@ public class NacosDelayTaskExecuteEngine extends AbstractNacosTaskExecuteEngine<
     
     @Override
     public Collection<Object> getAllTaskKeys() {
-        Collection<Object> keys = new HashSet<Object>();
+        Collection<Object> keys = new HashSet<>();
         lock.lock();
         try {
             keys.addAll(tasks.keySet());
@@ -145,17 +140,13 @@ public class NacosDelayTaskExecuteEngine extends AbstractNacosTaskExecuteEngine<
                 continue;
             }
             NacosTaskProcessor processor = getProcessor(taskKey);
-            if (null == processor) {
-                getEngineLog().error("processor not found for task, so discarded. " + task);
-                continue;
-            }
             try {
                 // ReAdd task if process failed
                 if (!processor.process(task)) {
                     retryFailedTask(taskKey, task);
                 }
             } catch (Throwable e) {
-                getEngineLog().error("Nacos task execute error : " + e.toString(), e);
+                getEngineLog().error("Nacos task execute error ", e);
                 retryFailedTask(taskKey, task);
             }
         }

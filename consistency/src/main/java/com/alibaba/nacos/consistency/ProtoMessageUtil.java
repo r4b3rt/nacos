@@ -16,12 +16,13 @@
 
 package com.alibaba.nacos.consistency;
 
-import com.alibaba.nacos.consistency.entity.GetRequest;
-import com.alibaba.nacos.consistency.entity.Log;
 import com.alibaba.nacos.consistency.entity.ReadRequest;
 import com.alibaba.nacos.consistency.entity.WriteRequest;
 import com.alibaba.nacos.consistency.exception.ConsistencyException;
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * protobuf message utils.
@@ -30,68 +31,44 @@ import com.google.protobuf.Message;
  */
 public class ProtoMessageUtil {
     
+    private static final Logger LOGGER = LoggerFactory.getLogger(ProtoMessageUtil.class);
+    
     /**
-     * Converts the byte array to a specific Protobuf object.
-     * Internally, the protobuf new and old objects are compatible.
+     * Request type prefix tag, distinct from fields of ReadRequest and WriteRequest.
+     */
+    public static final int REQUEST_TYPE_FIELD_TAG = 7 << 3;
+    
+    public static final int REQUEST_TYPE_READ = 1;
+    
+    public static final int REQUEST_TYPE_WRITE = 2;
+    
+    /**
+     * Parses Raft task data with a request type prefix into a Protobuf request.
      *
-     * @param bytes An array of bytes
-     * @return Message
+     * @param bytes request type prefix followed by the serialized request
+     * @return the read or write request selected by the prefix
+     * @throws ConsistencyException if the prefix or Protobuf data is invalid
      */
     public static Message parse(byte[] bytes) {
-        Message result;
-        try {
-            result = WriteRequest.parseFrom(bytes);
-            return result;
-        } catch (Throwable ignore) {
-        }
-        try {
-            result = ReadRequest.parseFrom(bytes);
-            return result;
-        } catch (Throwable ignore) {
-        }
-        
-        // old consistency entity, will be @Deprecated in future
-        try {
-            Log log = Log.parseFrom(bytes);
-            return convertToWriteRequest(log);
-        } catch (Throwable ignore) {
+        if (bytes == null || bytes.length < 2 || bytes[0] != REQUEST_TYPE_FIELD_TAG) {
+            LOGGER.debug("Failed to parse protocol request: missing request type prefix");
+            throw new ConsistencyException("Missing request type prefix");
         }
         
         try {
-            GetRequest request = GetRequest.parseFrom(bytes);
-            return convertToReadRequest(request);
-        } catch (Throwable ignore) {
+            switch (bytes[1]) {
+                case REQUEST_TYPE_READ:
+                    return ReadRequest.parseFrom(bytes);
+                case REQUEST_TYPE_WRITE:
+                    return WriteRequest.parseFrom(bytes);
+                default:
+                    LOGGER.debug("Failed to parse protocol request: unsupported request type {}",
+                        bytes[1]);
+                    throw new ConsistencyException("Unsupported request type: " + bytes[1]);
+            }
+        } catch (InvalidProtocolBufferException e) {
+            LOGGER.debug("Failed to parse protocol request, request type: {}", bytes[1], e);
+            throw new ConsistencyException("Failed to parse protocol request", e);
         }
-        
-        throw new ConsistencyException("The current array cannot be serialized to the corresponding object");
-    }
-    
-    /**
-     * convert Log to WriteRequest.
-     *
-     * @param log log
-     * @return {@link WriteRequest}
-     */
-    public static WriteRequest convertToWriteRequest(Log log) {
-        return WriteRequest.newBuilder().setKey(log.getKey()).setGroup(log.getGroup())
-                .setData(log.getData())
-                .setType(log.getType())
-                .setOperation(log.getOperation())
-                .putAllExtendInfo(log.getExtendInfoMap())
-                .build();
-    }
-    
-    /**
-     * convert Log to ReadRequest.
-     *
-     * @param request request
-     * @return {@link ReadRequest}
-     */
-    public static ReadRequest convertToReadRequest(GetRequest request) {
-        return ReadRequest.newBuilder()
-                .setGroup(request.getGroup())
-                .setData(request.getData())
-                .putAllExtendInfo(request.getExtendInfoMap())
-                .build();
     }
 }

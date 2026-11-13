@@ -16,17 +16,21 @@
 
 package com.alibaba.nacos.naming.remote.rpc.handler;
 
+import com.alibaba.nacos.api.annotation.Since;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.naming.remote.request.ServiceListRequest;
 import com.alibaba.nacos.api.naming.remote.response.ServiceListResponse;
 import com.alibaba.nacos.api.remote.request.RequestMeta;
 import com.alibaba.nacos.auth.annotation.Secured;
-import com.alibaba.nacos.auth.common.ActionTypes;
+import com.alibaba.nacos.core.control.TpsControl;
+import com.alibaba.nacos.core.namespace.filter.NamespaceValidation;
+import com.alibaba.nacos.core.paramcheck.ExtractorManager;
+import com.alibaba.nacos.core.paramcheck.impl.ServiceListRequestParamExtractor;
 import com.alibaba.nacos.core.remote.RequestHandler;
 import com.alibaba.nacos.naming.core.v2.ServiceManager;
 import com.alibaba.nacos.naming.core.v2.pojo.Service;
 import com.alibaba.nacos.naming.utils.ServiceUtil;
-import com.alibaba.nacos.naming.web.NamingResourceParser;
+import com.alibaba.nacos.plugin.auth.constant.ActionTypes;
 import org.springframework.stereotype.Component;
 
 import java.util.Collection;
@@ -40,26 +44,36 @@ import java.util.Objects;
  *
  * @author xiweng.yy
  */
+@Since("2.0.0")
 @Component
-public class ServiceListRequestHandler extends RequestHandler<ServiceListRequest, ServiceListResponse> {
+public class ServiceListRequestHandler
+    extends RequestHandler<ServiceListRequest, ServiceListResponse> {
     
     @Override
-    @Secured(action = ActionTypes.READ, parser = NamingResourceParser.class)
-    public ServiceListResponse handle(ServiceListRequest request, RequestMeta meta) throws NacosException {
-        Collection<Service> serviceSet = ServiceManager.getInstance().getSingletons(request.getNamespace());
-        ServiceListResponse result = ServiceListResponse.buildSuccessResponse(0, new LinkedList<>());
+    @NamespaceValidation
+    @TpsControl(pointName = "RemoteNamingServiceListQuery", name = "RemoteNamingServiceListQuery")
+    @Secured(action = ActionTypes.READ)
+    @ExtractorManager.Extractor(rpcExtractor = ServiceListRequestParamExtractor.class)
+    public ServiceListResponse handle(ServiceListRequest request, RequestMeta meta)
+        throws NacosException {
+        Collection<Service> serviceSet =
+            ServiceManager.getInstance().getSingletons(request.getNamespace());
+        ServiceListResponse result =
+            ServiceListResponse.buildSuccessResponse(0, new LinkedList<>());
         if (!serviceSet.isEmpty()) {
-            Collection<String> serviceNameSet = selectServiceWithGroupName(serviceSet, request.getGroupName());
+            Collection<String> serviceNameSet =
+                selectServiceWithGroupName(serviceSet, request.getGroupName());
             // TODO select service by selector
             List<String> serviceNameList = ServiceUtil
-                    .pageServiceName(request.getPageNo(), request.getPageSize(), serviceNameSet);
-            result.setCount(serviceNameList.size());
+                .pageServiceName(request.getPageNo(), request.getPageSize(), serviceNameSet);
+            result.setCount(serviceNameSet.size());
             result.setServiceNames(serviceNameList);
         }
         return result;
     }
     
-    private Collection<String> selectServiceWithGroupName(Collection<Service> serviceSet, String groupName) {
+    private Collection<String> selectServiceWithGroupName(Collection<Service> serviceSet,
+        String groupName) {
         Collection<String> result = new HashSet<>(serviceSet.size());
         for (Service each : serviceSet) {
             if (Objects.equals(groupName, each.getGroup())) {

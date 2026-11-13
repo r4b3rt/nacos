@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2020 Alibaba Group Holding Ltd.
+ * Copyright 1999-2023 Alibaba Group Holding Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,13 +16,13 @@
 
 package com.alibaba.nacos.core.remote;
 
-import com.alibaba.nacos.api.remote.PayloadRegistry;
 import com.alibaba.nacos.common.remote.ConnectionType;
+import com.alibaba.nacos.common.remote.PayloadRegistry;
+import com.alibaba.nacos.core.remote.tls.RpcServerSslContextRefresherHolder;
 import com.alibaba.nacos.core.utils.Loggers;
 import com.alibaba.nacos.sys.env.EnvUtil;
-
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 
 /**
  * abstract rpc server .
@@ -42,24 +42,30 @@ public abstract class BaseRpcServer {
     @PostConstruct
     public void start() throws Exception {
         String serverName = getClass().getSimpleName();
-        Loggers.REMOTE.info("Nacos {} Rpc server starting at port {}", serverName, getServicePort());
+        Loggers.REMOTE.info("Nacos {} Rpc server starting at port {}", serverName,
+            getServicePort());
         
         startServer();
         
+        if (RpcServerSslContextRefresherHolder.getSdkInstance() != null) {
+            RpcServerSslContextRefresherHolder.getSdkInstance().refresh(this);
+        }
+        
+        if (RpcServerSslContextRefresherHolder.getClusterInstance() != null) {
+            RpcServerSslContextRefresherHolder.getClusterInstance().refresh(this);
+        }
+        
         Loggers.REMOTE.info("Nacos {} Rpc server started at port {}", serverName, getServicePort());
-        Runtime.getRuntime().addShutdownHook(new Thread() {
-            @Override
-            public void run() {
-                Loggers.REMOTE.info("Nacos {} Rpc server stopping", serverName);
-                try {
-                    BaseRpcServer.this.stopServer();
-                    Loggers.REMOTE.info("Nacos {} Rpc server stopped successfully...", serverName);
-                } catch (Exception e) {
-                    Loggers.REMOTE.error("Nacos {} Rpc server stopped fail...", serverName, e);
-                }
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            Loggers.REMOTE.info("Nacos {} Rpc server stopping", serverName);
+            try {
+                BaseRpcServer.this.stopServer();
+                Loggers.REMOTE.info("Nacos {} Rpc server stopped successfully...", serverName);
+            } catch (Exception e) {
+                Loggers.REMOTE.error("Nacos {} Rpc server stopped fail...", serverName, e);
             }
-        });
-
+        }));
+        
     }
     
     /**
@@ -68,6 +74,16 @@ public abstract class BaseRpcServer {
      * @return connection type.
      */
     public abstract ConnectionType getConnectionType();
+    
+    /**
+     * Reload protocol context if necessary.
+     *
+     * <p>
+     * protocol like:
+     * <li>Tls</li>
+     * </p>
+     */
+    public abstract void reloadProtocolContext();
     
     /**
      * Start sever.
@@ -106,5 +122,5 @@ public abstract class BaseRpcServer {
      */
     @PreDestroy
     public abstract void shutdownServer();
-
+    
 }

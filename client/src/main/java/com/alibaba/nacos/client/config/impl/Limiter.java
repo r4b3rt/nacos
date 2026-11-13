@@ -16,14 +16,13 @@
 
 package com.alibaba.nacos.client.config.impl;
 
+import com.alibaba.nacos.client.env.NacosClientProperties;
 import com.alibaba.nacos.client.utils.LogUtils;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.util.concurrent.RateLimiter;
 import org.slf4j.Logger;
 
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -39,7 +38,8 @@ public class Limiter {
     
     private static final int LIMIT_TIME = 1000;
     
-    private static final Cache<String, RateLimiter> CACHE = CacheBuilder.newBuilder().initialCapacity(CAPACITY_SIZE)
+    private static final Cache<String, RateLimiter> CACHE =
+        CacheBuilder.newBuilder().initialCapacity(CAPACITY_SIZE)
             .expireAfterAccess(1, TimeUnit.MINUTES).build();
     
     private static final String LIMIT_TIME_PROPERTY = "limitTime";
@@ -51,7 +51,8 @@ public class Limiter {
     
     static {
         try {
-            String limitTimeStr = System.getProperty(LIMIT_TIME_PROPERTY, String.valueOf(limit));
+            String limitTimeStr = NacosClientProperties.PROTOTYPE.getProperty(LIMIT_TIME_PROPERTY,
+                String.valueOf(limit));
             limit = Double.parseDouble(limitTimeStr);
             LOGGER.info("limitTime:{}", limit);
         } catch (Exception e) {
@@ -62,23 +63,18 @@ public class Limiter {
     /**
      * Judge whether access key is limited.
      *
-     * @param accessKeyID access key
+     * @param accessKeyId access key
      * @return true if is limited, otherwise false
      */
-    public static boolean isLimit(String accessKeyID) {
+    public static boolean isLimit(String accessKeyId) {
         RateLimiter rateLimiter = null;
         try {
-            rateLimiter = CACHE.get(accessKeyID, new Callable<RateLimiter>() {
-                @Override
-                public RateLimiter call() throws Exception {
-                    return RateLimiter.create(limit);
-                }
-            });
-        } catch (ExecutionException e) {
+            rateLimiter = CACHE.get(accessKeyId, () -> RateLimiter.create(limit));
+        } catch (Exception e) {
             LOGGER.error("create limit fail", e);
         }
         if (rateLimiter != null && !rateLimiter.tryAcquire(LIMIT_TIME, TimeUnit.MILLISECONDS)) {
-            LOGGER.error("access_key_id:{} limited", accessKeyID);
+            LOGGER.error("access_key_id:{} limited", accessKeyId);
             return true;
         }
         return false;

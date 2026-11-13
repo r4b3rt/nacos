@@ -21,62 +21,133 @@ package com.alibaba.nacos.client.naming;
 import com.alibaba.nacos.api.PropertyKeyConst;
 import com.alibaba.nacos.api.common.Constants;
 import com.alibaba.nacos.api.exception.NacosException;
-import com.alibaba.nacos.api.naming.listener.Event;
 import com.alibaba.nacos.api.naming.listener.EventListener;
+import com.alibaba.nacos.api.naming.listener.FuzzyWatchEventWatcher;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.alibaba.nacos.api.naming.pojo.ServiceInfo;
 import com.alibaba.nacos.api.selector.AbstractSelector;
+import com.alibaba.nacos.client.env.NacosClientProperties;
+import com.alibaba.nacos.client.naming.cache.DiskCache;
+import com.alibaba.nacos.client.naming.cache.NamingFuzzyWatchContext;
+import com.alibaba.nacos.client.naming.cache.NamingFuzzyWatchServiceListHolder;
+import com.alibaba.nacos.client.naming.cache.ServiceInfoHolder;
+import com.alibaba.nacos.client.naming.event.InstancesChangeEvent;
 import com.alibaba.nacos.client.naming.event.InstancesChangeNotifier;
 import com.alibaba.nacos.client.naming.remote.NamingClientProxy;
+import com.alibaba.nacos.client.naming.remote.TestConnection;
+import com.alibaba.nacos.client.naming.remote.gprc.NamingGrpcClientProxy;
+import com.alibaba.nacos.client.naming.remote.gprc.redo.NamingGrpcRedoService;
+import com.alibaba.nacos.client.naming.remote.gprc.redo.RedoScheduledTask;
 import com.alibaba.nacos.client.naming.remote.http.NamingHttpClientProxy;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.mockito.ArgumentMatcher;
+import com.alibaba.nacos.client.naming.selector.NamingSelectorFactory;
+import com.alibaba.nacos.client.naming.selector.NamingSelectorWrapper;
+import com.alibaba.nacos.client.naming.utils.CacheDirUtil;
+import com.alibaba.nacos.client.naming.utils.UtilAndComs;
+import com.alibaba.nacos.common.remote.client.RpcClient;
+import com.alibaba.nacos.common.utils.CollectionUtils;
+import com.alibaba.nacos.common.utils.ReflectUtils;
+import com.alibaba.nacos.common.utils.StringUtils;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Field;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.alibaba.nacos.client.naming.selector.NamingSelectorFactory.getUniqueClusterString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-public class NacosNamingServiceTest {
+@ExtendWith(MockitoExtension.class)
+class NacosNamingServiceTest {
+    
+    @Mock
+    private NamingClientProxy proxy;
+    
+    @Mock
+    private InstancesChangeNotifier changeNotifier;
+    
+    @Mock
+    private ServiceInfoHolder serviceInfoHolder;
     
     private NacosNamingService client;
     
-    private NamingClientProxy proxy;
-    
-    private InstancesChangeNotifier changeNotifier;
-    
-    @Before
-    public void before() throws NoSuchFieldException, NacosException, IllegalAccessException {
+    @BeforeEach
+    void before() throws NoSuchFieldException, NacosException, IllegalAccessException {
         Properties prop = new Properties();
+        prop.setProperty("serverAddr", "localhost");
         prop.put(PropertyKeyConst.NAMESPACE, "test");
         client = new NacosNamingService(prop);
+        injectMocks(client);
+    }
+    
+    @AfterEach
+    void tearDown() throws NacosException {
+        client.shutDown();
+    }
+    
+    private void injectMocks(NacosNamingService client)
+        throws NoSuchFieldException, IllegalAccessException {
         // inject proxy
-        proxy = mock(NamingHttpClientProxy.class);
         Field serverProxyField = NacosNamingService.class.getDeclaredField("clientProxy");
         serverProxyField.setAccessible(true);
+        try {
+            ((NamingHttpClientProxy) serverProxyField.get(client)).shutdown();
+        } catch (Throwable ignored) {
+        }
         serverProxyField.set(client, proxy);
+        
         // inject notifier
-        changeNotifier = mock(InstancesChangeNotifier.class);
+        doReturn(InstancesChangeEvent.class).when(changeNotifier).subscribeType();
         Field changeNotifierField = NacosNamingService.class.getDeclaredField("changeNotifier");
         changeNotifierField.setAccessible(true);
         changeNotifierField.set(client, changeNotifier);
+        
+        // inject service info holder
+        Field serviceInfoHolderField =
+            NacosNamingService.class.getDeclaredField("serviceInfoHolder");
+        serviceInfoHolderField.setAccessible(true);
+        try {
+            ((ServiceInfoHolder) serviceInfoHolderField.get(client)).shutdown();
+        } catch (Throwable ignored) {
+        }
+        serviceInfoHolderField.set(client, serviceInfoHolder);
     }
     
     @Test
-    public void testRegisterInstance1() throws NacosException {
+    void testRegisterInstanceSingle() throws NacosException {
         //given
         String serviceName = "service1";
         String ip = "1.1.1.1";
@@ -84,19 +155,14 @@ public class NacosNamingServiceTest {
         //when
         client.registerInstance(serviceName, ip, port);
         //then
-        verify(proxy, times(1))
-                .registerService(eq(serviceName), eq(Constants.DEFAULT_GROUP), argThat(new ArgumentMatcher<Instance>() {
-                    @Override
-                    public boolean matches(Instance instance) {
-                        return instance.getIp().equals(ip) && instance.getPort() == port
-                                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
-                                .equals(Constants.DEFAULT_CLUSTER_NAME);
-                    }
-                }));
+        verify(proxy, times(1)).registerService(eq(serviceName), eq(Constants.DEFAULT_GROUP),
+            argThat(instance -> instance.getIp().equals(ip) && instance.getPort() == port
+                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
+                    .equals(Constants.DEFAULT_CLUSTER_NAME)));
     }
     
     @Test
-    public void testRegisterInstance2() throws NacosException {
+    void testRegisterInstanceSingleWithGroup() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
@@ -105,19 +171,14 @@ public class NacosNamingServiceTest {
         //when
         client.registerInstance(serviceName, groupName, ip, port);
         //then
-        verify(proxy, times(1))
-                .registerService(eq(serviceName), eq(groupName), argThat(new ArgumentMatcher<Instance>() {
-                    @Override
-                    public boolean matches(Instance instance) {
-                        return instance.getIp().equals(ip) && instance.getPort() == port
-                                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
-                                .equals(Constants.DEFAULT_CLUSTER_NAME);
-                    }
-                }));
+        verify(proxy, times(1)).registerService(eq(serviceName), eq(groupName),
+            argThat(instance -> instance.getIp().equals(ip) && instance.getPort() == port
+                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
+                    .equals(Constants.DEFAULT_CLUSTER_NAME)));
     }
     
     @Test
-    public void testRegisterInstance3() throws NacosException {
+    void testRegisterInstanceSingleWithCluster() throws NacosException {
         //given
         String serviceName = "service1";
         String clusterName = "cluster1";
@@ -126,19 +187,14 @@ public class NacosNamingServiceTest {
         //when
         client.registerInstance(serviceName, ip, port, clusterName);
         //then
-        verify(proxy, times(1))
-                .registerService(eq(serviceName), eq(Constants.DEFAULT_GROUP), argThat(new ArgumentMatcher<Instance>() {
-                    @Override
-                    public boolean matches(Instance instance) {
-                        return instance.getIp().equals(ip) && instance.getPort() == port
-                                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
-                                .equals(clusterName);
-                    }
-                }));
+        verify(proxy, times(1)).registerService(eq(serviceName), eq(Constants.DEFAULT_GROUP),
+            argThat(instance -> instance.getIp().equals(ip) && instance.getPort() == port
+                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
+                    .equals(clusterName)));
     }
     
     @Test
-    public void testRegisterInstance4() throws NacosException {
+    void testRegisterInstanceSingleFull() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
@@ -148,22 +204,18 @@ public class NacosNamingServiceTest {
         //when
         client.registerInstance(serviceName, groupName, ip, port, clusterName);
         //then
-        verify(proxy, times(1))
-                .registerService(eq(serviceName), eq(groupName), argThat(new ArgumentMatcher<Instance>() {
-                    @Override
-                    public boolean matches(Instance instance) {
-                        return instance.getIp().equals(ip) && instance.getPort() == port
-                                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
-                                .equals(clusterName);
-                    }
-                }));
+        verify(proxy, times(1)).registerService(eq(serviceName), eq(groupName),
+            argThat(instance -> instance.getIp().equals(ip) && instance.getPort() == port
+                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
+                    .equals(clusterName)));
     }
     
     @Test
-    public void testRegisterInstance5() throws NacosException {
+    void testRegisterInstanceByInstanceOnlyService() throws NacosException {
         //given
         String serviceName = "service1";
         Instance instance = new Instance();
+        instance.setIp("1.1.1.1");
         //when
         client.registerInstance(serviceName, instance);
         //then
@@ -171,11 +223,12 @@ public class NacosNamingServiceTest {
     }
     
     @Test
-    public void testRegisterInstance6() throws NacosException {
+    void testRegisterInstanceByInstanceFullName() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
         Instance instance = new Instance();
+        instance.setIp("1.1.1.1");
         //when
         client.registerInstance(serviceName, groupName, instance);
         //then
@@ -183,7 +236,104 @@ public class NacosNamingServiceTest {
     }
     
     @Test
-    public void testDeregisterInstance1() throws NacosException {
+    void testRegisterInstanceByInstanceWithCluster() throws NacosException {
+        Throwable exception = assertThrows(NacosException.class, () -> {
+            
+            //given
+            String serviceName = "service1";
+            String groupName = "group1";
+            Instance instance = new Instance();
+            instance.setIp("1.1.1.1");
+            instance.setClusterName("cluster1,cluster2");
+            //when
+            client.registerInstance(serviceName, groupName, instance);
+        });
+        assertTrue(exception.getMessage().contains(
+            "Instance 'clusterName' should be characters with only 0-9a-zA-Z-. (current: cluster1,cluster2)"));
+    }
+    
+    @Test
+    void testBatchRegisterInstance() throws NacosException {
+        Instance instance = new Instance();
+        String serviceName = "service1";
+        String ip = "1.1.1.1";
+        int port = 10000;
+        instance.setServiceName(serviceName);
+        instance.setEphemeral(true);
+        instance.setPort(port);
+        instance.setIp(ip);
+        List<Instance> instanceList = new ArrayList<>();
+        instanceList.add(instance);
+        //when
+        client.batchRegisterInstance(serviceName, Constants.DEFAULT_GROUP, instanceList);
+        //then
+        verify(proxy, times(1)).batchRegisterService(eq(serviceName), eq(Constants.DEFAULT_GROUP),
+            argThat(instances -> CollectionUtils.isEqualCollection(instanceList, instances)));
+    }
+    
+    @Test
+    void testBatchRegisterInstanceWithGroupNamePrefix() throws NacosException {
+        Instance instance = new Instance();
+        String serviceName = "service1";
+        String ip = "1.1.1.1";
+        int port = 10000;
+        instance.setServiceName(Constants.DEFAULT_GROUP + "@@" + serviceName);
+        instance.setEphemeral(true);
+        instance.setPort(port);
+        instance.setIp(ip);
+        List<Instance> instanceList = new ArrayList<>();
+        instanceList.add(instance);
+        //when
+        client.batchRegisterInstance(serviceName, Constants.DEFAULT_GROUP, instanceList);
+        //then
+        verify(proxy, times(1)).batchRegisterService(eq(serviceName), eq(Constants.DEFAULT_GROUP),
+            argThat(instances -> CollectionUtils.isEqualCollection(instanceList, instances)));
+    }
+    
+    @Test
+    void testBatchRegisterInstanceWithWrongGroupNamePrefix() throws NacosException {
+        Instance instance = new Instance();
+        String serviceName = "service1";
+        String ip = "1.1.1.1";
+        int port = 10000;
+        instance.setServiceName("WrongGroup" + "@@" + serviceName);
+        instance.setEphemeral(true);
+        instance.setPort(port);
+        instance.setIp(ip);
+        List<Instance> instanceList = new ArrayList<>();
+        instanceList.add(instance);
+        //when
+        try {
+            client.batchRegisterInstance(serviceName, Constants.DEFAULT_GROUP, instanceList);
+        } catch (Exception e) {
+            assertTrue(e instanceof NacosException);
+            assertTrue(e.getMessage().contains("wrong group name prefix of instance service name"));
+        }
+    }
+    
+    @Test
+    void testBatchDeRegisterInstance() throws NacosException {
+        Instance instance = new Instance();
+        String serviceName = "service1";
+        String ip = "1.1.1.1";
+        int port = 10000;
+        instance.setServiceName(serviceName);
+        instance.setEphemeral(true);
+        instance.setPort(port);
+        instance.setIp(ip);
+        List<Instance> instanceList = new ArrayList<>();
+        instanceList.add(instance);
+        //when
+        try {
+            client.batchDeregisterInstance(serviceName, Constants.DEFAULT_GROUP, instanceList);
+        } catch (Exception e) {
+            assertTrue(e instanceof NacosException);
+            assertTrue(e.getMessage().contains("not found"));
+        }
+    }
+    
+    @Test
+    void testDeregisterInstanceSingle() throws NacosException {
         //given
         String serviceName = "service1";
         String ip = "1.1.1.1";
@@ -192,18 +342,13 @@ public class NacosNamingServiceTest {
         client.deregisterInstance(serviceName, ip, port);
         //then
         verify(proxy, times(1)).deregisterService(eq(serviceName), eq(Constants.DEFAULT_GROUP),
-                argThat(new ArgumentMatcher<Instance>() {
-                    @Override
-                    public boolean matches(Instance instance) {
-                        return instance.getIp().equals(ip) && instance.getPort() == port
-                                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
-                                .equals(Constants.DEFAULT_CLUSTER_NAME);
-                    }
-                }));
+            argThat(instance -> instance.getIp().equals(ip) && instance.getPort() == port
+                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
+                    .equals(Constants.DEFAULT_CLUSTER_NAME)));
     }
     
     @Test
-    public void testDeregisterInstance2() throws NacosException {
+    void testDeregisterInstanceSingleWithGroup() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
@@ -212,19 +357,14 @@ public class NacosNamingServiceTest {
         //when
         client.deregisterInstance(serviceName, groupName, ip, port);
         //then
-        verify(proxy, times(1))
-                .deregisterService(eq(serviceName), eq(groupName), argThat(new ArgumentMatcher<Instance>() {
-                    @Override
-                    public boolean matches(Instance instance) {
-                        return instance.getIp().equals(ip) && instance.getPort() == port
-                                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
-                                .equals(Constants.DEFAULT_CLUSTER_NAME);
-                    }
-                }));
+        verify(proxy, times(1)).deregisterService(eq(serviceName), eq(groupName),
+            argThat(instance -> instance.getIp().equals(ip) && instance.getPort() == port
+                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
+                    .equals(Constants.DEFAULT_CLUSTER_NAME)));
     }
     
     @Test
-    public void testDeregisterInstance3() throws NacosException {
+    void testDeregisterInstanceSingleWithCluster() throws NacosException {
         //given
         String serviceName = "service1";
         String clusterName = "cluster1";
@@ -234,18 +374,13 @@ public class NacosNamingServiceTest {
         client.deregisterInstance(serviceName, ip, port, clusterName);
         //then
         verify(proxy, times(1)).deregisterService(eq(serviceName), eq(Constants.DEFAULT_GROUP),
-                argThat(new ArgumentMatcher<Instance>() {
-                    @Override
-                    public boolean matches(Instance instance) {
-                        return instance.getIp().equals(ip) && instance.getPort() == port
-                                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
-                                .equals(clusterName);
-                    }
-                }));
+            argThat(instance -> instance.getIp().equals(ip) && instance.getPort() == port
+                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
+                    .equals(clusterName)));
     }
     
     @Test
-    public void testDeregisterInstance4() throws NacosException {
+    void testDeregisterInstanceSingleFull() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
@@ -255,22 +390,18 @@ public class NacosNamingServiceTest {
         //when
         client.deregisterInstance(serviceName, groupName, ip, port, clusterName);
         //then
-        verify(proxy, times(1))
-                .deregisterService(eq(serviceName), eq(groupName), argThat(new ArgumentMatcher<Instance>() {
-                    @Override
-                    public boolean matches(Instance instance) {
-                        return instance.getIp().equals(ip) && instance.getPort() == port
-                                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
-                                .equals(clusterName);
-                    }
-                }));
+        verify(proxy, times(1)).deregisterService(eq(serviceName), eq(groupName),
+            argThat(instance -> instance.getIp().equals(ip) && instance.getPort() == port
+                && Math.abs(instance.getWeight() - 1.0) < 0.01f && instance.getClusterName()
+                    .equals(clusterName)));
     }
     
     @Test
-    public void testDeregisterInstance5() throws NacosException {
+    void testDeregisterInstanceByInstanceOnlyService() throws NacosException {
         //given
         String serviceName = "service1";
         Instance instance = new Instance();
+        instance.setIp("1.1.1.1");
         //when
         client.deregisterInstance(serviceName, instance);
         //then
@@ -278,11 +409,12 @@ public class NacosNamingServiceTest {
     }
     
     @Test
-    public void testDeregisterInstance6() throws NacosException {
+    void testDeregisterInstanceByInstanceFullName() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
         Instance instance = new Instance();
+        instance.setIp("1.1.1.1");
         //when
         client.deregisterInstance(serviceName, groupName, instance);
         //then
@@ -290,189 +422,451 @@ public class NacosNamingServiceTest {
     }
     
     @Test
-    public void testGetAllInstances1() throws NacosException {
+    void testGetAllInstancesOnlyService() throws NacosException {
         //given
         String serviceName = "service1";
         //when
-        client.getAllInstances(serviceName);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(new Instance());
+        when(proxy.subscribe(serviceName, Constants.DEFAULT_GROUP, "")).thenReturn(serviceInfo);
+        List<Instance> result = client.getAllInstances(serviceName);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, Constants.DEFAULT_GROUP, "");
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testGetAllInstances2() throws NacosException {
+    void testGetAllInstancesFullName() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
         //when
-        client.getAllInstances(serviceName, groupName);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.setGroupName(groupName);
+        serviceInfo.addHost(new Instance());
+        when(proxy.subscribe(serviceName, groupName, "")).thenReturn(serviceInfo);
+        List<Instance> result = client.getAllInstances(serviceName, groupName);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, groupName, "");
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testGetAllInstances3() throws NacosException {
+    void testGetAllInstancesOnlyServiceNotSubscribe() throws NacosException {
         //given
         String serviceName = "service1";
         //when
-        client.getAllInstances(serviceName, false);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(new Instance());
+        when(proxy.queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP, "", false))
+            .thenReturn(serviceInfo);
+        List<Instance> result = client.getAllInstances(serviceName, false);
         //then
-        verify(proxy, times(1)).queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP, "", 0, false);
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testGetAllInstances4() throws NacosException {
+    void testGetAllInstancesFullNameNotSubscribe() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
         //when
-        client.getAllInstances(serviceName, groupName, false);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.setGroupName(groupName);
+        serviceInfo.addHost(new Instance());
+        when(proxy.queryInstancesOfService(serviceName, groupName, "", false))
+            .thenReturn(serviceInfo);
+        List<Instance> result = client.getAllInstances(serviceName, groupName, false);
         //then
-        verify(proxy, times(1)).queryInstancesOfService(serviceName, groupName, "", 0, false);
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
         
     }
     
     @Test
-    public void testGetAllInstances5() throws NacosException {
+    void testGetAllInstancesWithServiceAndClusters() throws NacosException {
         //given
         String serviceName = "service1";
-        List<String> clusterList = Arrays.asList("cluster1", "cluster2");
         //when
-        client.getAllInstances(serviceName, clusterList);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(mockInstance("cluster1", false));
+        serviceInfo.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, false));
+        List<String> clusterList = Arrays.asList("cluster1", "cluster2");
+        when(proxy.subscribe(serviceName, Constants.DEFAULT_GROUP, "")).thenReturn(serviceInfo);
+        List<Instance> result = client.getAllInstances(serviceName, clusterList);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, Constants.DEFAULT_GROUP, "cluster1,cluster2");
+        assertEquals(1, result.size());
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testGetAllInstances6() throws NacosException {
+    void testGetAllInstancesWithFullNameAndClusters() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
+        // when
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.setGroupName(groupName);
+        serviceInfo.addHost(mockInstance("cluster1", false));
+        serviceInfo.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, false));
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
-        //when
-        client.getAllInstances(serviceName, groupName, clusterList);
+        serviceInfo.getHosts().get(1).setClusterName(Constants.DEFAULT_CLUSTER_NAME);
+        when(proxy.subscribe(serviceName, groupName, "")).thenReturn(serviceInfo);
+        List<Instance> result = client.getAllInstances(serviceName, groupName, clusterList);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, groupName, "cluster1,cluster2");
+        assertEquals(1, result.size());
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
         
     }
     
     @Test
-    public void testGetAllInstances7() throws NacosException {
+    void testGetAllInstancesWithServiceAndClustersNotSubscribe() throws NacosException {
         //given
         String serviceName = "service1";
+        //when
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(mockInstance("cluster1", false));
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
-        //when
-        client.getAllInstances(serviceName, clusterList, false);
+        when(proxy.queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP,
+            "cluster1,cluster2",
+            false)).thenReturn(serviceInfo);
+        List<Instance> result = client.getAllInstances(serviceName, clusterList, false);
         //then
-        verify(proxy, times(1))
-                .queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP, "cluster1,cluster2", 0, false);
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testGetAllInstances8() throws NacosException {
+    void testGetAllInstancesWithFullNameAndClustersNotSubscribe() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
+        // when
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.setGroupName(groupName);
+        serviceInfo.addHost(mockInstance("cluster1", false));
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
-        //when
-        client.getAllInstances(serviceName, groupName, clusterList, false);
+        when(proxy.queryInstancesOfService(serviceName, groupName, "cluster1,cluster2", false))
+            .thenReturn(serviceInfo);
+        List<Instance> result = client.getAllInstances(serviceName, groupName, clusterList, false);
         //then
-        verify(proxy, times(1)).queryInstancesOfService(serviceName, groupName, "cluster1,cluster2", 0, false);
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testSelectInstances1() throws NacosException {
+    void testGetAllInstanceFromFailover() throws NacosException {
+        when(serviceInfoHolder.isFailoverSwitch()).thenReturn(true);
+        ServiceInfo serviceInfo = new ServiceInfo("group1@@service1");
+        serviceInfo.setHosts(Collections.singletonList(new Instance()));
+        when(serviceInfoHolder.getFailoverServiceInfo("service1", "group1"))
+            .thenReturn(serviceInfo);
+        List<Instance> actual = client.getAllInstances("service1", "group1", false);
+        verify(proxy, never()).queryInstancesOfService(anyString(), anyString(), anyString(),
+            anyBoolean());
+        assertEquals(1, actual.size());
+        assertEquals(new Instance(), actual.get(0));
+    }
+    
+    @Test
+    void testGetAllInstanceFromFailoverEmpty() throws NacosException {
+        when(serviceInfoHolder.isFailoverSwitch()).thenReturn(true);
+        ServiceInfo serviceInfo = new ServiceInfo("group1@@service1");
+        when(serviceInfoHolder.getFailoverServiceInfo("service1", "group1"))
+            .thenReturn(serviceInfo);
+        List<Instance> actual = client.getAllInstances("service1", "group1", false);
+        verify(proxy).queryInstancesOfService(anyString(), anyString(), anyString(), anyBoolean());
+        assertEquals(0, actual.size());
+    }
+    
+    @Test
+    void testGetAllInstanceWithCacheAndSubscribeException() throws NacosException {
+        String serviceName = "service1";
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(new Instance());
+        when(serviceInfoHolder.getServiceInfo(serviceName, Constants.DEFAULT_GROUP))
+            .thenReturn(serviceInfo);
+        when(proxy.subscribe(serviceName, Constants.DEFAULT_GROUP, ""))
+            .thenThrow(new NacosException(500, "test"));
+        List<Instance> result = client.getAllInstances(serviceName);
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
+    }
+    
+    @Test
+    void testGetAllInstanceWithoutCacheAndSubscribeException() throws NacosException {
+        String serviceName = "service1";
+        when(proxy.subscribe(serviceName, Constants.DEFAULT_GROUP, ""))
+            .thenThrow(new NacosException(500, "test"));
+        assertThrows(NacosException.class, () -> client.getAllInstances(serviceName));
+    }
+    
+    @Test
+    void testDiskCacheWithoutIntentStillSubscribesSynchronously(@TempDir Path cacheRoot)
+        throws Exception {
+        String serviceName = "disk-cache";
+        ServiceInfo cached = new ServiceInfo(Constants.DEFAULT_GROUP + "@@" + serviceName);
+        cached.addHost(new Instance());
+        ServiceInfo remote = new ServiceInfo(Constants.DEFAULT_GROUP + "@@" + serviceName);
+        Instance current = new Instance();
+        current.setPort(8080);
+        remote.addHost(current);
+        when(proxy.subscribe(serviceName, Constants.DEFAULT_GROUP, "")).thenReturn(remote);
+        Properties properties = new Properties();
+        properties.setProperty("JM.SNAPSHOT.PATH", cacheRoot.toString());
+        properties.setProperty(PropertyKeyConst.NAMING_LOAD_CACHE_AT_START, "true");
+        NacosClientProperties clientProperties = NacosClientProperties.PROTOTYPE.derive(properties);
+        DiskCache.write(cached, CacheDirUtil.initCacheDir("test", clientProperties));
+        ServiceInfoHolder diskHolder =
+            new ServiceInfoHolder("test", "disk-cache", clientProperties);
+        try {
+            assertEquals(cached.getHosts(),
+                diskHolder.getServiceInfo(serviceName, Constants.DEFAULT_GROUP).getHosts());
+            Field field = NacosNamingService.class.getDeclaredField("serviceInfoHolder");
+            field.setAccessible(true);
+            field.set(client, diskHolder);
+            assertEquals(remote.getHosts(), client.getAllInstances(serviceName));
+            verify(proxy).subscribe(serviceName, Constants.DEFAULT_GROUP, "");
+        } finally {
+            diskHolder.shutdown();
+        }
+    }
+    
+    @Test
+    void testCachedReadsDoNotWaitForSubscriptionRedoAndPreserveRecovery() throws Exception {
+        String serviceName = "runtime-cache";
+        String groupName = Constants.DEFAULT_GROUP;
+        ServiceInfo cached = new ServiceInfo(groupName + "@@" + serviceName);
+        Instance instance = new Instance();
+        instance.setIp("127.0.0.1");
+        instance.setPort(8080);
+        cached.addHost(instance);
+        when(serviceInfoHolder.getServiceInfo(serviceName, groupName)).thenReturn(cached);
+        NamingGrpcClientProxy recoveryProxy = mock(NamingGrpcClientProxy.class);
+        NamingGrpcRedoService redoService = new NamingGrpcRedoService(recoveryProxy,
+            mock(NamingFuzzyWatchServiceListHolder.class),
+            NacosClientProperties.PROTOTYPE.derive(new Properties()));
+        ((ScheduledExecutorService) ReflectUtils.getFieldValue(redoService, "redoExecutor"))
+            .shutdownNow();
+        CountDownLatch recoveryStarted = new CountDownLatch(1);
+        CountDownLatch releaseRecovery = new CountDownLatch(1);
+        CompletableFuture<Boolean> recoveryReleased = new CompletableFuture<>();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        ExecutorService queryWorker = Executors.newSingleThreadExecutor();
+        try {
+            redoService.cacheSubscriberForRedo(serviceName, groupName, "");
+            redoService.subscriberRegistered(serviceName, groupName, "");
+            TestConnection connection = new TestConnection(new RpcClient.ServerInfo());
+            redoService.onDisConnect(connection);
+            redoService.onConnected(connection);
+            when(proxy.hasSubscriptionIntent(serviceName, groupName, ""))
+                .thenAnswer(invocation -> redoService.hasSubscriptionIntent(serviceName, groupName,
+                    ""));
+            when(recoveryProxy.isEnable()).thenReturn(true);
+            doAnswer(invocation -> {
+                recoveryStarted.countDown();
+                try {
+                    recoveryReleased.complete(releaseRecovery.await(15, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    recoveryReleased.completeExceptionally(e);
+                    throw e;
+                }
+                throw new NacosException(NacosException.SERVER_ERROR,
+                    "subscription response timeout");
+            }).when(recoveryProxy).doSubscribe(serviceName, groupName, "");
+            RedoScheduledTask task = new RedoScheduledTask(recoveryProxy, redoService);
+            Future<?> recovery = worker.submit(task);
+            assertTrue(recoveryStarted.await(5, TimeUnit.SECONDS));
+            
+            Future<List<Instance>> cachedReads = queryWorker.submit(() -> Arrays.asList(
+                client.getAllInstances(serviceName).get(0),
+                client.selectInstances(serviceName, true).get(0),
+                client.selectOneHealthyInstance(serviceName)));
+            assertEquals(Arrays.asList(instance, instance, instance),
+                cachedReads.get(5, TimeUnit.SECONDS));
+            assertFalse(recoveryReleased.isDone(),
+                "cached reads should finish while subscription redo is still blocked");
+            assertFalse(recovery.isDone());
+            verify(proxy, never()).subscribe(anyString(), anyString(), anyString());
+            assertFalse(redoService.isSubscriberRegistered(serviceName, groupName, ""));
+            assertEquals(1, redoService.findSubscriberRedoData().size());
+            
+            releaseRecovery.countDown();
+            assertTrue(recoveryReleased.get(5, TimeUnit.SECONDS),
+                "subscription redo should be released explicitly rather than time out");
+            recovery.get(5, TimeUnit.SECONDS);
+            assertTrue(redoService.hasSubscriptionIntent(serviceName, groupName, ""));
+            assertEquals(1, redoService.findSubscriberRedoData().size());
+            doAnswer(invocation -> {
+                redoService.subscriberRegistered(serviceName, groupName, "");
+                return cached;
+            }).when(recoveryProxy).doSubscribe(serviceName, groupName, "");
+            task.run();
+            assertTrue(redoService.isSubscriberRegistered(serviceName, groupName, ""));
+            assertTrue(redoService.findSubscriberRedoData().isEmpty());
+        } finally {
+            releaseRecovery.countDown();
+            queryWorker.shutdownNow();
+            worker.shutdownNow();
+            redoService.shutdown();
+        }
+    }
+    
+    @Test
+    void testGetAllInstanceWithCacheAndSubscriptionIntent() throws NacosException {
+        String serviceName = "service1";
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(new Instance());
+        when(serviceInfoHolder.getServiceInfo(serviceName, Constants.DEFAULT_GROUP))
+            .thenReturn(serviceInfo);
+        when(proxy.hasSubscriptionIntent(serviceName, Constants.DEFAULT_GROUP, ""))
+            .thenReturn(true);
+        List<Instance> result = client.getAllInstances(serviceName);
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
+    }
+    
+    @Test
+    void testSelectInstancesOnlyService() throws NacosException {
         //given
         String serviceName = "service1";
         //when
-        client.selectInstances(serviceName, true);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(proxy.subscribe(serviceName, Constants.DEFAULT_GROUP, "")).thenReturn(serviceInfo);
+        List<Instance> result = client.selectInstances(serviceName, true);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, Constants.DEFAULT_GROUP, "");
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testSelectInstances2() throws NacosException {
+    void testSelectInstancesFullName() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
         //when
-        client.selectInstances(serviceName, groupName, true);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(proxy.subscribe(serviceName, groupName, "")).thenReturn(serviceInfo);
+        List<Instance> result = client.selectInstances(serviceName, groupName, true);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, groupName, "");
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testSelectInstances3() throws NacosException {
+    void testSelectInstancesOnlyServiceNotSubscribe() throws NacosException {
         //given
         String serviceName = "service1";
         //when
-        client.selectInstances(serviceName, true, false);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(proxy.queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP, "", false))
+            .thenReturn(serviceInfo);
+        List<Instance> result = client.selectInstances(serviceName, true, false);
         //then
-        verify(proxy, times(1)).queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP, "", 0, false);
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testSelectInstances4() throws NacosException {
+    void testSelectInstancesFullNameNotSubscribe() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
         //when
-        client.selectInstances(serviceName, groupName, true, false);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(proxy.queryInstancesOfService(serviceName, groupName, "", false))
+            .thenReturn(serviceInfo);
+        List<Instance> result = client.selectInstances(serviceName, groupName, true, false);
         //then
-        verify(proxy, times(1)).queryInstancesOfService(serviceName, groupName, "", 0, false);
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
         
     }
     
     @Test
-    public void testSelectInstances5() throws NacosException {
+    void testSelectInstancesWithServiceAndClusters() throws NacosException {
         //given
         String serviceName = "service1";
-        List<String> clusterList = Arrays.asList("cluster1", "cluster2");
         //when
-        client.selectInstances(serviceName, clusterList, true);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(mockInstance("cluster1", true));
+        serviceInfo.addHost(mockInstance("cluster1", false));
+        List<String> clusterList = Arrays.asList("cluster1", "cluster2");
+        when(proxy.subscribe(serviceName, Constants.DEFAULT_GROUP, "")).thenReturn(serviceInfo);
+        List<Instance> result = client.selectInstances(serviceName, clusterList, true);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, Constants.DEFAULT_GROUP, "cluster1,cluster2");
+        assertEquals(1, result.size());
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testSelectInstances6() throws NacosException {
+    void testSelectInstancesWithFullNameAndClusters() throws NacosException {
         //given
         String serviceName = "service1";
-        String groupName = "group1";
-        List<String> clusterList = Arrays.asList("cluster1", "cluster2");
+        final String groupName = "group1";
         //when
-        client.selectInstances(serviceName, groupName, clusterList, true);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(mockInstance("cluster1", true));
+        serviceInfo.addHost(mockInstance("cluster1", false));
+        List<String> clusterList = Arrays.asList("cluster1", "cluster2");
+        when(proxy.subscribe(serviceName, groupName, "")).thenReturn(serviceInfo);
+        List<Instance> result = client.selectInstances(serviceName, groupName, clusterList, true);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, groupName, "cluster1,cluster2");
+        assertEquals(1, result.size());
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
         
     }
     
     @Test
-    public void testSelectInstances7() throws NacosException {
+    void testSelectInstancesWithServiceAndClustersNotSubscribe() throws NacosException {
         //given
         String serviceName = "service1";
-        List<String> clusterList = Arrays.asList("cluster1", "cluster2");
         //when
-        client.selectInstances(serviceName, clusterList, true, false);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(mockInstance("cluster1", true));
+        serviceInfo.addHost(mockInstance("cluster1", false));
+        List<String> clusterList = Arrays.asList("cluster1", "cluster2");
+        when(proxy.queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP,
+            "cluster1,cluster2",
+            false)).thenReturn(serviceInfo);
+        List<Instance> result = client.selectInstances(serviceName, clusterList, true, false);
         //then
-        verify(proxy, times(1))
-                .queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP, "cluster1,cluster2", 0, false);
+        assertEquals(1, result.size());
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testSelectInstances8() throws NacosException {
+    void testSelectInstancesWithFullNameAndClustersNotSubscribe() throws NacosException {
         //given
         String serviceName = "service1";
-        String groupName = "group1";
-        List<String> clusterList = Arrays.asList("cluster1", "cluster2");
+        final String groupName = "group1";
         //when
-        client.selectInstances(serviceName, groupName, clusterList, true, false);
+        ServiceInfo serviceInfo = new ServiceInfo();
+        serviceInfo.setName(serviceName);
+        serviceInfo.addHost(mockInstance("cluster1", true));
+        serviceInfo.addHost(mockInstance("cluster1", false));
+        List<String> clusterList = Arrays.asList("cluster1", "cluster2");
+        when(proxy.queryInstancesOfService(serviceName, groupName, "cluster1,cluster2", false))
+            .thenReturn(serviceInfo);
+        List<Instance> result =
+            client.selectInstances(serviceName, groupName, clusterList, true, false);
         //then
-        verify(proxy, times(1)).queryInstancesOfService(serviceName, groupName, "cluster1,cluster2", 0, false);
+        assertEquals(1, result.size());
+        assertEquals(serviceInfo.getHosts().get(0), result.get(0));
     }
     
     @Test
-    public void testSelectInstancesWithHealthyFlag() throws NacosException {
+    void testSelectInstancesWithHealthyFlag() throws NacosException {
         //given
         Instance healthyInstance = new Instance();
         healthyInstance.setHealthy(true);
@@ -498,337 +892,424 @@ public class NacosNamingServiceTest {
         String serviceName = "service1";
         String groupName = "group1";
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
-        when(proxy.queryInstancesOfService(serviceName, groupName, "cluster1,cluster2", 0, false)).thenReturn(info);
+        when(proxy.queryInstancesOfService(serviceName, groupName, "cluster1,cluster2", false))
+            .thenReturn(info);
         
         //when
-        List<Instance> instances = client.selectInstances(serviceName, groupName, clusterList, true, false);
+        List<Instance> instances =
+            client.selectInstances(serviceName, groupName, clusterList, true, false);
         //then
-        Assert.assertEquals(1, instances.size());
-        Assert.assertSame(healthyInstance, instances.get(0));
+        assertEquals(1, instances.size());
+        assertSame(healthyInstance, instances.get(0));
     }
     
     @Test
-    public void testSelectOneHealthyInstance1() throws NacosException {
+    void testSelectOneHealthyInstanceOnlyService() throws NacosException {
         //given
-        Instance healthyInstance = new Instance();
-        healthyInstance.setIp("1.1.1.1");
-        healthyInstance.setPort(1000);
-        List<Instance> hosts = new ArrayList<>();
-        hosts.add(healthyInstance);
         ServiceInfo infoWithHealthyInstance = new ServiceInfo();
-        infoWithHealthyInstance.setHosts(hosts);
-        when(proxy.subscribe(anyString(), anyString(), anyString())).thenReturn(infoWithHealthyInstance);
+        infoWithHealthyInstance.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(proxy.subscribe(anyString(), anyString(), anyString()))
+            .thenReturn(infoWithHealthyInstance);
         
         String serviceName = "service1";
         //when
-        client.selectOneHealthyInstance(serviceName);
+        Instance instance = client.selectOneHealthyInstance(serviceName);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, Constants.DEFAULT_GROUP, "");
+        assertNotNull(instance);
     }
     
     @Test
-    public void testSelectOneHealthyInstance2() throws NacosException {
+    void testSelectOneHealthyInstanceFullName() throws NacosException {
         //given
-        Instance healthyInstance = new Instance();
-        healthyInstance.setIp("1.1.1.1");
-        healthyInstance.setPort(1000);
-        List<Instance> hosts = new ArrayList<>();
-        hosts.add(healthyInstance);
         ServiceInfo infoWithHealthyInstance = new ServiceInfo();
-        infoWithHealthyInstance.setHosts(hosts);
-        when(proxy.subscribe(anyString(), anyString(), anyString())).thenReturn(infoWithHealthyInstance);
+        infoWithHealthyInstance.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(proxy.subscribe(anyString(), anyString(), anyString()))
+            .thenReturn(infoWithHealthyInstance);
         
         String serviceName = "service1";
         String groupName = "group1";
         //when
-        client.selectOneHealthyInstance(serviceName, groupName);
+        Instance instance = client.selectOneHealthyInstance(serviceName, groupName);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, groupName, "");
+        assertNotNull(instance);
     }
     
     @Test
-    public void testSelectOneHealthyInstance3() throws NacosException {
+    void testSelectOneHealthyInstanceOnlyServiceNotSubscribe() throws NacosException {
         //given
-        Instance healthyInstance = new Instance();
-        healthyInstance.setIp("1.1.1.1");
-        healthyInstance.setPort(1000);
-        List<Instance> hosts = new ArrayList<>();
-        hosts.add(healthyInstance);
         ServiceInfo infoWithHealthyInstance = new ServiceInfo();
-        infoWithHealthyInstance.setHosts(hosts);
-        when(proxy.queryInstancesOfService(anyString(), anyString(), anyString(), anyInt(), anyBoolean()))
-                .thenReturn(infoWithHealthyInstance);
+        infoWithHealthyInstance.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(proxy.queryInstancesOfService(anyString(), anyString(), anyString(), anyBoolean()))
+            .thenReturn(
+                infoWithHealthyInstance);
         
         String serviceName = "service1";
         //when
-        client.selectOneHealthyInstance(serviceName, false);
+        Instance instance = client.selectOneHealthyInstance(serviceName, false);
         //then
-        verify(proxy, times(1)).queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP, "", 0, false);
+        assertNotNull(instance);
     }
     
     @Test
-    public void testSelectOneHealthyInstance4() throws NacosException {
+    void testSelectOneHealthyInstanceFullNameNotSubscribe() throws NacosException {
         //given
-        Instance healthyInstance = new Instance();
-        healthyInstance.setIp("1.1.1.1");
-        healthyInstance.setPort(1000);
-        List<Instance> hosts = new ArrayList<>();
-        hosts.add(healthyInstance);
         ServiceInfo infoWithHealthyInstance = new ServiceInfo();
-        infoWithHealthyInstance.setHosts(hosts);
-        when(proxy.queryInstancesOfService(anyString(), anyString(), anyString(), anyInt(), anyBoolean()))
-                .thenReturn(infoWithHealthyInstance);
+        infoWithHealthyInstance.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(proxy.queryInstancesOfService(anyString(), anyString(), anyString(), anyBoolean()))
+            .thenReturn(
+                infoWithHealthyInstance);
         
         String serviceName = "service1";
         String groupName = "group1";
         //when
-        client.selectOneHealthyInstance(serviceName, groupName, false);
+        Instance instance = client.selectOneHealthyInstance(serviceName, groupName, false);
         //then
-        verify(proxy, times(1)).queryInstancesOfService(serviceName, groupName, "", 0, false);
+        assertNotNull(instance);
         
     }
     
     @Test
-    public void testSelectOneHealthyInstance5() throws NacosException {
+    void testSelectOneHealthyInstanceWithServiceAndClusters() throws NacosException {
         //given
-        Instance healthyInstance = new Instance();
-        healthyInstance.setIp("1.1.1.1");
-        healthyInstance.setPort(1000);
-        List<Instance> hosts = new ArrayList<>();
-        hosts.add(healthyInstance);
         ServiceInfo infoWithHealthyInstance = new ServiceInfo();
-        infoWithHealthyInstance.setHosts(hosts);
-        when(proxy.subscribe(anyString(), anyString(), anyString())).thenReturn(infoWithHealthyInstance);
-        
+        infoWithHealthyInstance.addHost(mockInstance("cluster1", true));
+        infoWithHealthyInstance.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
         String serviceName = "service1";
+        when(proxy.subscribe(serviceName, Constants.DEFAULT_GROUP, StringUtils.EMPTY)).thenReturn(
+            infoWithHealthyInstance);
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
         //when
-        client.selectOneHealthyInstance(serviceName, clusterList);
+        Instance instance = client.selectOneHealthyInstance(serviceName, clusterList);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, Constants.DEFAULT_GROUP, "cluster1,cluster2");
+        assertNotNull(instance);
+        assertEquals("cluster1", instance.getClusterName());
     }
     
     @Test
-    public void testSelectOneHealthyInstance6() throws NacosException {
+    void testSelectOneHealthyInstanceWithFullNameAndClusters() throws NacosException {
         //given
-        Instance healthyInstance = new Instance();
-        healthyInstance.setIp("1.1.1.1");
-        healthyInstance.setPort(1000);
-        List<Instance> hosts = new ArrayList<>();
-        hosts.add(healthyInstance);
         ServiceInfo infoWithHealthyInstance = new ServiceInfo();
-        infoWithHealthyInstance.setHosts(hosts);
-        when(proxy.subscribe(anyString(), anyString(), anyString())).thenReturn(infoWithHealthyInstance);
+        infoWithHealthyInstance.addHost(mockInstance("cluster1", true));
+        infoWithHealthyInstance.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(proxy.subscribe(anyString(), anyString(), anyString()))
+            .thenReturn(infoWithHealthyInstance);
         
         String serviceName = "service1";
         String groupName = "group1";
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
         //when
-        client.selectOneHealthyInstance(serviceName, groupName, clusterList);
+        Instance instance = client.selectOneHealthyInstance(serviceName, groupName, clusterList);
         //then
-        verify(proxy, times(1)).subscribe(serviceName, groupName, "cluster1,cluster2");
-        
+        assertNotNull(instance);
+        assertEquals("cluster1", instance.getClusterName());
     }
     
     @Test
-    public void testSelectOneHealthyInstance7() throws NacosException {
+    void testSelectOneHealthyInstanceWithServiceAndClustersNotSubscribe() throws NacosException {
         //given
-        Instance healthyInstance = new Instance();
-        healthyInstance.setIp("1.1.1.1");
-        healthyInstance.setPort(1000);
-        List<Instance> hosts = new ArrayList<>();
-        hosts.add(healthyInstance);
         ServiceInfo infoWithHealthyInstance = new ServiceInfo();
-        infoWithHealthyInstance.setHosts(hosts);
-        when(proxy.queryInstancesOfService(anyString(), anyString(), anyString(), anyInt(), anyBoolean()))
-                .thenReturn(infoWithHealthyInstance);
+        infoWithHealthyInstance.addHost(mockInstance("cluster1", true));
+        when(proxy.queryInstancesOfService(anyString(), anyString(), anyString(), anyBoolean()))
+            .thenReturn(
+                infoWithHealthyInstance);
         
         String serviceName = "service1";
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
         //when
-        client.selectOneHealthyInstance(serviceName, clusterList, false);
+        Instance instance = client.selectOneHealthyInstance(serviceName, clusterList, false);
         //then
-        verify(proxy, times(1))
-                .queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP, "cluster1,cluster2", 0, false);
+        assertNotNull(instance);
+        assertEquals("cluster1", instance.getClusterName());
     }
     
     @Test
-    public void testSelectOneHealthyInstance8() throws NacosException {
+    void testSelectOneHealthyInstanceWithFullNameAndClustersNotSubscribe() throws NacosException {
         //given
-        Instance healthyInstance = new Instance();
-        healthyInstance.setIp("1.1.1.1");
-        healthyInstance.setPort(1000);
-        List<Instance> hosts = new ArrayList<>();
-        hosts.add(healthyInstance);
         ServiceInfo infoWithHealthyInstance = new ServiceInfo();
-        infoWithHealthyInstance.setHosts(hosts);
-        when(proxy.queryInstancesOfService(anyString(), anyString(), anyString(), anyInt(), anyBoolean()))
-                .thenReturn(infoWithHealthyInstance);
+        infoWithHealthyInstance.addHost(mockInstance("cluster1", true));
+        when(proxy.queryInstancesOfService(anyString(), anyString(), anyString(), anyBoolean()))
+            .thenReturn(
+                infoWithHealthyInstance);
         
         String serviceName = "service1";
         String groupName = "group1";
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
         //when
-        client.selectOneHealthyInstance(serviceName, groupName, clusterList, false);
+        Instance instance =
+            client.selectOneHealthyInstance(serviceName, groupName, clusterList, false);
         //then
-        verify(proxy, times(1)).queryInstancesOfService(serviceName, groupName, "cluster1,cluster2", 0, false);
+        assertNotNull(instance);
+        assertEquals("cluster1", instance.getClusterName());
     }
     
     @Test
-    public void testSubscribe1() throws NacosException {
+    void testSubscribeOnlyService() throws NacosException {
         //given
         String serviceName = "service1";
-        EventListener listener = new EventListener() {
-            @Override
-            public void onEvent(Event event) {
+        EventListener listener = event -> {
             
-            }
         };
         //when
         client.subscribe(serviceName, listener);
+        NamingSelectorWrapper wrapper = new NamingSelectorWrapper(serviceName,
+            Constants.DEFAULT_GROUP, Constants.NULL,
+            NamingSelectorFactory.newClusterSelector(Collections.emptyList()), listener);
         //then
-        verify(changeNotifier, times(1)).registerListener(Constants.DEFAULT_GROUP, serviceName, "", listener);
+        verify(changeNotifier, times(1)).registerListener(Constants.DEFAULT_GROUP, serviceName,
+            wrapper);
         verify(proxy, times(1)).subscribe(serviceName, Constants.DEFAULT_GROUP, "");
     }
     
     @Test
-    public void testSubscribe2() throws NacosException {
+    void testSubscribeFullName() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
-        EventListener listener = new EventListener() {
-            @Override
-            public void onEvent(Event event) {
+        EventListener listener = event -> {
             
-            }
         };
         //when
         client.subscribe(serviceName, groupName, listener);
+        NamingSelectorWrapper wrapper = new NamingSelectorWrapper(serviceName, groupName,
+            Constants.NULL,
+            NamingSelectorFactory.newClusterSelector(Collections.emptyList()), listener);
         //then
-        verify(changeNotifier, times(1)).registerListener(groupName, serviceName, "", listener);
+        verify(changeNotifier, times(1)).registerListener(groupName, serviceName, wrapper);
         verify(proxy, times(1)).subscribe(serviceName, groupName, "");
     }
     
     @Test
-    public void testSubscribe3() throws NacosException {
+    void testSubscribeWithServiceAndClusters() throws NacosException {
         //given
         String serviceName = "service1";
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
-        EventListener listener = new EventListener() {
-            @Override
-            public void onEvent(Event event) {
+        EventListener listener = event -> {
             
-            }
         };
         //when
         client.subscribe(serviceName, clusterList, listener);
+        NamingSelectorWrapper wrapper =
+            new NamingSelectorWrapper(serviceName, Constants.DEFAULT_GROUP, Constants.NULL,
+                NamingSelectorFactory.newClusterSelector(clusterList), listener);
         //then
-        verify(changeNotifier, times(1))
-                .registerListener(Constants.DEFAULT_GROUP, serviceName, "cluster1,cluster2", listener);
-        verify(proxy, times(1)).subscribe(serviceName, Constants.DEFAULT_GROUP, "cluster1,cluster2");
+        verify(changeNotifier, times(1)).registerListener(Constants.DEFAULT_GROUP, serviceName,
+            wrapper);
+        verify(proxy, times(1)).subscribe(serviceName, Constants.DEFAULT_GROUP, Constants.NULL);
     }
     
     @Test
-    public void testSubscribe4() throws NacosException {
+    void testSubscribeWithFullNameAndClusters() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
-        EventListener listener = new EventListener() {
-            @Override
-            public void onEvent(Event event) {
+        EventListener listener = event -> {
             
-            }
         };
         //when
         client.subscribe(serviceName, groupName, clusterList, listener);
+        NamingSelectorWrapper wrapper = new NamingSelectorWrapper(serviceName, groupName,
+            getUniqueClusterString(clusterList),
+            NamingSelectorFactory.newClusterSelector(clusterList), listener);
         //then
-        verify(changeNotifier, times(1)).registerListener(groupName, serviceName, "cluster1,cluster2", listener);
-        verify(proxy, times(1)).subscribe(serviceName, groupName, "cluster1,cluster2");
+        verify(changeNotifier, times(1)).registerListener(groupName, serviceName, wrapper);
+        verify(proxy, times(1)).subscribe(serviceName, groupName, Constants.NULL);
     }
     
     @Test
-    public void testUnSubscribe1() throws NacosException {
+    public void testSubscribeWithServiceAndCustomSelector() throws NacosException {
+        String serviceName = "service1";
+        EventListener listener = event -> {
+            
+        };
+        //when
+        client.subscribe(serviceName, NamingSelectorFactory.HEALTHY_SELECTOR, listener);
+        NamingSelectorWrapper wrapper =
+            new NamingSelectorWrapper(serviceName, Constants.DEFAULT_GROUP, Constants.NULL,
+                NamingSelectorFactory.HEALTHY_SELECTOR, listener);
+        //then
+        verify(changeNotifier, times(1)).registerListener(Constants.DEFAULT_GROUP, serviceName,
+            wrapper);
+        verify(proxy, times(1)).subscribe(serviceName, Constants.DEFAULT_GROUP, Constants.NULL);
+    }
+    
+    @Test
+    public void testSubscribeWithFullNameAndCustomSelector() throws NacosException {
+        String serviceName = "service1";
+        String groupName = "group1";
+        EventListener listener = event -> {
+            
+        };
+        //when
+        client.subscribe(serviceName, groupName, NamingSelectorFactory.HEALTHY_SELECTOR, listener);
+        NamingSelectorWrapper wrapper =
+            new NamingSelectorWrapper(serviceName, groupName, Constants.NULL,
+                NamingSelectorFactory.HEALTHY_SELECTOR, listener);
+        //then
+        verify(changeNotifier, times(1)).registerListener(groupName, serviceName, wrapper);
+        verify(proxy, times(1)).subscribe(serviceName, groupName, Constants.NULL);
+    }
+    
+    @Test
+    void testSubscribeWithNullListener() throws NacosException {
+        String serviceName = "service1";
+        String groupName = "group1";
+        //when
+        client.subscribe(serviceName, groupName, null);
+        //then
+        verify(changeNotifier, never()).registerListener(groupName, serviceName,
+            new NamingSelectorWrapper(NamingSelectorFactory.newIpSelector(""), null));
+        verify(proxy, never()).subscribe(serviceName, groupName, "");
+        
+    }
+    
+    @Test
+    void testSubscribeDuplicate() throws NacosException {
+        String serviceName = "service1";
+        when(proxy.isSubscribed(serviceName, Constants.DEFAULT_GROUP, StringUtils.EMPTY))
+            .thenReturn(true);
+        ServiceInfo serviceInfo = new ServiceInfo(Constants.DEFAULT_GROUP + "@@" + serviceName);
+        serviceInfo.addHost(new Instance());
+        when(serviceInfoHolder.getServiceInfo(serviceName, Constants.DEFAULT_GROUP))
+            .thenReturn(serviceInfo);
+        final AtomicBoolean flag = new AtomicBoolean(false);
+        client.subscribe(serviceName, event -> flag.set(true));
+        assertTrue(flag.get());
+    }
+    
+    @Test
+    void testUnSubscribeOnlyService() throws NacosException {
         //given
         String serviceName = "service1";
-        EventListener listener = new EventListener() {
-            @Override
-            public void onEvent(Event event) {
-                
-            }
+        EventListener listener = event -> {
+            
         };
-        when(changeNotifier.isSubscribed(serviceName, Constants.DEFAULT_GROUP, "")).thenReturn(false);
+        when(changeNotifier.isSubscribed(Constants.DEFAULT_GROUP, serviceName)).thenReturn(false);
         //when
         client.unsubscribe(serviceName, listener);
         //then
-        verify(changeNotifier, times(1)).deregisterListener(Constants.DEFAULT_GROUP, serviceName, "", listener);
-        verify(proxy, times(1)).unsubscribe(serviceName, Constants.DEFAULT_GROUP, "");
+        NamingSelectorWrapper wrapper = new NamingSelectorWrapper(
+            NamingSelectorFactory.newClusterSelector(Collections.emptyList()), listener);
+        verify(changeNotifier, times(1)).deregisterListener(Constants.DEFAULT_GROUP, serviceName,
+            wrapper);
+        verify(proxy, times(1)).unsubscribe(serviceName, Constants.DEFAULT_GROUP, Constants.NULL);
     }
     
     @Test
-    public void testUnSubscribe2() throws NacosException {
+    void testUnSubscribeFullName() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
-        EventListener listener = new EventListener() {
-            @Override
-            public void onEvent(Event event) {
-                
-            }
+        EventListener listener = event -> {
+            
         };
-        when(changeNotifier.isSubscribed(serviceName, groupName, "")).thenReturn(false);
+        when(changeNotifier.isSubscribed(groupName, serviceName)).thenReturn(false);
         
         //when
         client.unsubscribe(serviceName, groupName, listener);
+        NamingSelectorWrapper wrapper = new NamingSelectorWrapper(
+            NamingSelectorFactory.newClusterSelector(Collections.emptyList()), listener);
         //then
-        verify(changeNotifier, times(1)).deregisterListener(groupName, serviceName, "", listener);
-        verify(proxy, times(1)).unsubscribe(serviceName, groupName, "");
+        verify(changeNotifier, times(1)).deregisterListener(groupName, serviceName, wrapper);
+        verify(proxy, times(1)).unsubscribe(serviceName, groupName, Constants.NULL);
     }
     
     @Test
-    public void testUnSubscribe3() throws NacosException {
+    void testUnSubscribeWithServiceAndClusters() throws NacosException {
         //given
         String serviceName = "service1";
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
-        EventListener listener = new EventListener() {
-            @Override
-            public void onEvent(Event event) {
-                
-            }
+        EventListener listener = event -> {
+            
         };
-        when(changeNotifier.isSubscribed(serviceName, Constants.DEFAULT_GROUP, "cluster1,cluster2")).thenReturn(false);
+        when(changeNotifier.isSubscribed(Constants.DEFAULT_GROUP, serviceName)).thenReturn(false);
         
         //when
         client.unsubscribe(serviceName, clusterList, listener);
+        NamingSelectorWrapper wrapper =
+            new NamingSelectorWrapper(NamingSelectorFactory.newClusterSelector(clusterList),
+                listener);
         //then
-        verify(changeNotifier, times(1))
-                .deregisterListener(Constants.DEFAULT_GROUP, serviceName, "cluster1,cluster2", listener);
-        verify(proxy, times(1)).unsubscribe(serviceName, Constants.DEFAULT_GROUP, "cluster1,cluster2");
+        verify(changeNotifier, times(1)).deregisterListener(Constants.DEFAULT_GROUP, serviceName,
+            wrapper);
+        verify(proxy, times(1)).unsubscribe(serviceName, Constants.DEFAULT_GROUP, Constants.NULL);
     }
     
     @Test
-    public void testUnSubscribe4() throws NacosException {
+    void testUnSubscribeWithFullNameAndClusters() throws NacosException {
         //given
         String serviceName = "service1";
         String groupName = "group1";
         List<String> clusterList = Arrays.asList("cluster1", "cluster2");
-        EventListener listener = new EventListener() {
-            @Override
-            public void onEvent(Event event) {
-                
-            }
+        EventListener listener = event -> {
+            
         };
-        when(changeNotifier.isSubscribed(serviceName, groupName, "cluster1,cluster2")).thenReturn(false);
+        when(changeNotifier.isSubscribed(groupName, serviceName)).thenReturn(false);
         
         //when
         client.unsubscribe(serviceName, groupName, clusterList, listener);
+        NamingSelectorWrapper wrapper =
+            new NamingSelectorWrapper(NamingSelectorFactory.newClusterSelector(clusterList),
+                listener);
         //then
-        verify(changeNotifier, times(1)).deregisterListener(groupName, serviceName, "cluster1,cluster2", listener);
-        verify(proxy, times(1)).unsubscribe(serviceName, groupName, "cluster1,cluster2");
+        verify(changeNotifier, times(1)).deregisterListener(groupName, serviceName, wrapper);
+        verify(proxy, times(1)).unsubscribe(serviceName, groupName, Constants.NULL);
     }
     
     @Test
-    public void testGetServicesOfServer1() throws NacosException {
+    public void testUnSubscribeWithServiceAndCustomSelector() throws NacosException {
+        //given
+        String serviceName = "service1";
+        EventListener listener = event -> {
+            
+        };
+        when(changeNotifier.isSubscribed(Constants.DEFAULT_GROUP, serviceName)).thenReturn(false);
+        
+        //when
+        client.unsubscribe(serviceName, NamingSelectorFactory.HEALTHY_SELECTOR, listener);
+        NamingSelectorWrapper wrapper =
+            new NamingSelectorWrapper(NamingSelectorFactory.HEALTHY_SELECTOR, listener);
+        //then
+        verify(changeNotifier, times(1)).deregisterListener(Constants.DEFAULT_GROUP, serviceName,
+            wrapper);
+        verify(proxy, times(1)).unsubscribe(serviceName, Constants.DEFAULT_GROUP, Constants.NULL);
+    }
+    
+    @Test
+    public void testUnSubscribeWithFullNameAndCustomSelector() throws NacosException {
+        //given
+        String serviceName = "service1";
+        String groupName = "group1";
+        EventListener listener = event -> {
+            
+        };
+        when(changeNotifier.isSubscribed(groupName, serviceName)).thenReturn(false);
+        
+        //when
+        client.unsubscribe(serviceName, groupName, NamingSelectorFactory.HEALTHY_SELECTOR,
+            listener);
+        NamingSelectorWrapper wrapper =
+            new NamingSelectorWrapper(NamingSelectorFactory.HEALTHY_SELECTOR, listener);
+        //then
+        verify(changeNotifier, times(1)).deregisterListener(groupName, serviceName, wrapper);
+        verify(proxy, times(1)).unsubscribe(serviceName, groupName, Constants.NULL);
+    }
+    
+    @Test
+    void testUnSubscribeWithNullListener() throws NacosException {
+        String serviceName = "service1";
+        String groupName = "group1";
+        //when
+        client.unsubscribe(serviceName, groupName, null);
+        //then
+        verify(changeNotifier, never()).deregisterListener(groupName, serviceName,
+            new NamingSelectorWrapper(NamingSelectorFactory.newIpSelector(""), null));
+        verify(proxy, never()).unsubscribe(serviceName, groupName, "");
+        
+    }
+    
+    @Test
+    void testGetServicesOfServer1() throws NacosException {
         //given
         int pageNo = 1;
         int pageSize = 10;
@@ -839,7 +1320,7 @@ public class NacosNamingServiceTest {
     }
     
     @Test
-    public void testGetServicesOfServer2() throws NacosException {
+    void testGetServicesOfServer2() throws NacosException {
         //given
         int pageNo = 1;
         int pageSize = 10;
@@ -851,11 +1332,12 @@ public class NacosNamingServiceTest {
     }
     
     @Test
-    public void testGetServicesOfServer3() throws NacosException {
+    void testGetServicesOfServer3() throws NacosException {
         //given
         int pageNo = 1;
         int pageSize = 10;
         AbstractSelector selector = new AbstractSelector("aaa") {
+            
             @Override
             public String getType() {
                 return super.getType();
@@ -868,13 +1350,14 @@ public class NacosNamingServiceTest {
     }
     
     @Test
-    public void testGetServicesOfServer4() throws NacosException {
+    void testGetServicesOfServer4() throws NacosException {
         //given
         int pageNo = 1;
         int pageSize = 10;
         String groupName = "group1";
         
         AbstractSelector selector = new AbstractSelector("aaa") {
+            
             @Override
             public String getType() {
                 return super.getType();
@@ -887,7 +1370,7 @@ public class NacosNamingServiceTest {
     }
     
     @Test
-    public void testGetSubscribeServices() {
+    void testGetSubscribeServices() {
         //when
         client.getSubscribeServices();
         //then
@@ -895,30 +1378,258 @@ public class NacosNamingServiceTest {
     }
     
     @Test
-    public void testGetServerStatus() {
+    void testGetServerStatus() {
         //given
         when(proxy.serverHealthy()).thenReturn(true);
         //when
         String serverStatus = client.getServerStatus();
         //then
-        Assert.assertEquals("UP", serverStatus);
+        assertEquals("UP", serverStatus);
     }
     
     @Test
-    public void testGetServerStatusFail() {
+    void testGetServerStatusFail() {
         //given
         when(proxy.serverHealthy()).thenReturn(false);
         //when
         String serverStatus = client.getServerStatus();
         //then
-        Assert.assertEquals("DOWN", serverStatus);
+        assertEquals("DOWN", serverStatus);
     }
     
     @Test
-    public void testShutDown() throws NacosException {
+    void testShutDown() throws NacosException {
         //when
         client.shutDown();
         //then
         verify(proxy, times(1)).shutdown();
+    }
+    
+    @Test
+    void testConstructorWithServerList()
+        throws NacosException, NoSuchFieldException, IllegalAccessException {
+        NacosNamingService namingService = new NacosNamingService("localhost");
+        try {
+            Field namespaceField = NacosNamingService.class.getDeclaredField("namespace");
+            namespaceField.setAccessible(true);
+            String namespace = (String) namespaceField.get(namingService);
+            assertEquals(UtilAndComs.DEFAULT_NAMESPACE_ID, namespace);
+        } finally {
+            namingService.shutDown();
+        }
+    }
+    
+    private Instance mockInstance(String clusterName, boolean healthy) {
+        Instance instance = new Instance();
+        instance.setClusterName(clusterName);
+        instance.setHealthy(healthy);
+        return instance;
+    }
+    
+    @Test
+    void testSelectInstancesEmptyServiceInfoReturnsEmptyList() throws NacosException {
+        String serviceName = "service-empty";
+        when(proxy.queryInstancesOfService(serviceName, Constants.DEFAULT_GROUP, "", false))
+            .thenReturn(null);
+        List<Instance> result = client.selectInstances(serviceName, true, false);
+        assertTrue(result.isEmpty());
+    }
+    
+    @Test
+    void testSelectInstancesFromFailover() throws NacosException {
+        String serviceName = "svc-failover";
+        ServiceInfo failoverInfo = new ServiceInfo();
+        failoverInfo.setName(serviceName);
+        failoverInfo.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(serviceInfoHolder.isFailoverSwitch()).thenReturn(true);
+        when(serviceInfoHolder.getFailoverServiceInfo(serviceName, Constants.DEFAULT_GROUP))
+            .thenReturn(failoverInfo);
+        List<Instance> result = client.selectInstances(serviceName, true);
+        assertEquals(1, result.size());
+        verify(proxy, never()).subscribe(anyString(), anyString(), anyString());
+    }
+    
+    @Test
+    void testSelectInstancesFailoverEmptyFallsBackToSubscribe() throws NacosException {
+        String serviceName = "svc-failover-empty";
+        ServiceInfo emptyFailover = new ServiceInfo();
+        emptyFailover.setName(serviceName);
+        when(serviceInfoHolder.isFailoverSwitch()).thenReturn(true);
+        when(serviceInfoHolder.getFailoverServiceInfo(serviceName, Constants.DEFAULT_GROUP))
+            .thenReturn(emptyFailover);
+        ServiceInfo subscribed = new ServiceInfo();
+        subscribed.setName(serviceName);
+        subscribed.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(proxy.subscribe(serviceName, Constants.DEFAULT_GROUP, "")).thenReturn(subscribed);
+        List<Instance> result = client.selectInstances(serviceName, true);
+        assertEquals(1, result.size());
+    }
+    
+    @Test
+    void testTryToSubscribeUsesCacheWithActiveSubscriptionIntent() throws NacosException {
+        String serviceName = "svc-cached";
+        ServiceInfo cached = new ServiceInfo();
+        cached.setName(serviceName);
+        cached.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(serviceInfoHolder.getServiceInfo(serviceName, Constants.DEFAULT_GROUP))
+            .thenReturn(cached);
+        when(proxy.hasSubscriptionIntent(serviceName, Constants.DEFAULT_GROUP, ""))
+            .thenReturn(true);
+        List<Instance> result = client.selectInstances(serviceName, true);
+        assertEquals(1, result.size());
+        verify(proxy, never()).subscribe(anyString(), anyString(), anyString());
+    }
+    
+    @Test
+    void testTryToSubscribeReturnsEmptyCacheWithActiveSubscriptionIntent() throws NacosException {
+        String serviceName = "svc-cached-not-subscribed";
+        ServiceInfo cached = new ServiceInfo();
+        cached.setName(serviceName);
+        when(serviceInfoHolder.getServiceInfo(serviceName, Constants.DEFAULT_GROUP))
+            .thenReturn(cached);
+        when(proxy.hasSubscriptionIntent(serviceName, Constants.DEFAULT_GROUP, ""))
+            .thenReturn(true);
+        List<Instance> result = client.selectInstances(serviceName, true);
+        assertTrue(result.isEmpty());
+        verify(proxy, never()).subscribe(anyString(), anyString(), anyString());
+    }
+    
+    @Test
+    void testCachedDiscoveryUsesPendingIntentAfterInitialSubscriptionFailure() throws Exception {
+        String serviceName = "initial-subscription-failure";
+        String groupName = Constants.DEFAULT_GROUP;
+        ServiceInfo cached = new ServiceInfo(groupName + "@@" + serviceName);
+        cached.addHost(mockInstance(Constants.DEFAULT_CLUSTER_NAME, true));
+        when(serviceInfoHolder.getServiceInfo(serviceName, groupName)).thenReturn(cached);
+        NamingGrpcRedoService redoService = new NamingGrpcRedoService(
+            mock(NamingGrpcClientProxy.class), mock(NamingFuzzyWatchServiceListHolder.class),
+            NacosClientProperties.PROTOTYPE.derive(new Properties()));
+        ((ScheduledExecutorService) ReflectUtils.getFieldValue(redoService, "redoExecutor"))
+            .shutdownNow();
+        try {
+            when(proxy.hasSubscriptionIntent(serviceName, groupName, ""))
+                .thenAnswer(invocation -> redoService.hasSubscriptionIntent(serviceName, groupName,
+                    ""));
+            when(proxy.subscribe(serviceName, groupName, "")).thenAnswer(invocation -> {
+                redoService.cacheSubscriberForRedo(serviceName, groupName, "");
+                throw new NacosException(500, "subscription response timeout");
+            });
+            
+            assertEquals(cached.getHosts(), client.getAllInstances(serviceName));
+            assertFalse(redoService.isSubscriberRegistered(serviceName, groupName, ""));
+            assertEquals(cached.getHosts(), client.getAllInstances(serviceName));
+            verify(proxy).subscribe(serviceName, groupName, "");
+            assertEquals(1, redoService.findSubscriberRedoData().size());
+        } finally {
+            redoService.shutdown();
+        }
+    }
+    
+    @Test
+    void testFuzzyWatchWithFixedGroupName() throws Exception {
+        NamingFuzzyWatchServiceListHolder holder =
+            org.mockito.Mockito.mock(NamingFuzzyWatchServiceListHolder.class);
+        NamingFuzzyWatchContext ctx = org.mockito.Mockito.mock(NamingFuzzyWatchContext.class);
+        when(holder.registerFuzzyWatcher(anyString(),
+            org.mockito.ArgumentMatchers.any(FuzzyWatchEventWatcher.class))).thenReturn(ctx);
+        Field f = NacosNamingService.class.getDeclaredField("namingFuzzyWatchServiceListHolder");
+        f.setAccessible(true);
+        f.set(client, holder);
+        FuzzyWatchEventWatcher watcher =
+            org.mockito.Mockito.mock(FuzzyWatchEventWatcher.class);
+        client.fuzzyWatch("test-group", watcher);
+        verify(holder).registerFuzzyWatcher(anyString(), eq(watcher));
+    }
+    
+    @Test
+    void testFuzzyWatchWithPatterns() throws Exception {
+        NamingFuzzyWatchServiceListHolder holder =
+            org.mockito.Mockito.mock(NamingFuzzyWatchServiceListHolder.class);
+        NamingFuzzyWatchContext ctx = org.mockito.Mockito.mock(NamingFuzzyWatchContext.class);
+        when(holder.registerFuzzyWatcher(anyString(),
+            org.mockito.ArgumentMatchers.any(FuzzyWatchEventWatcher.class))).thenReturn(ctx);
+        Field f = NacosNamingService.class.getDeclaredField("namingFuzzyWatchServiceListHolder");
+        f.setAccessible(true);
+        f.set(client, holder);
+        FuzzyWatchEventWatcher watcher =
+            org.mockito.Mockito.mock(FuzzyWatchEventWatcher.class);
+        client.fuzzyWatch("svc-*", "grp-*", watcher);
+        verify(holder).registerFuzzyWatcher(anyString(), eq(watcher));
+    }
+    
+    @Test
+    void testFuzzyWatchWithKeysReturnsFuture() throws Exception {
+        NamingFuzzyWatchServiceListHolder holder =
+            org.mockito.Mockito.mock(NamingFuzzyWatchServiceListHolder.class);
+        NamingFuzzyWatchContext ctx = org.mockito.Mockito.mock(NamingFuzzyWatchContext.class);
+        when(holder.registerFuzzyWatcher(anyString(),
+            org.mockito.ArgumentMatchers.any(FuzzyWatchEventWatcher.class))).thenReturn(ctx);
+        when(ctx.createNewFuture())
+            .thenReturn(org.mockito.Mockito.mock(java.util.concurrent.Future.class));
+        Field f = NacosNamingService.class.getDeclaredField("namingFuzzyWatchServiceListHolder");
+        f.setAccessible(true);
+        f.set(client, holder);
+        FuzzyWatchEventWatcher watcher =
+            org.mockito.Mockito.mock(FuzzyWatchEventWatcher.class);
+        assertNotNull(client.fuzzyWatchWithServiceKeys("test-grp", watcher));
+        assertNotNull(client.fuzzyWatchWithServiceKeys("svc-*", "grp-*", watcher));
+    }
+    
+    @Test
+    void testFuzzyWatchNullWatcherReturnsNullFuture() throws Exception {
+        // null watcher means doFuzzyWatch returns null
+        java.util.concurrent.Future<?> result =
+            client.fuzzyWatchWithServiceKeys("group", null);
+        assertEquals(null, result);
+    }
+    
+    @Test
+    void testCancelFuzzyWatchWithFixedGroup() throws Exception {
+        NamingFuzzyWatchServiceListHolder holder =
+            org.mockito.Mockito.mock(NamingFuzzyWatchServiceListHolder.class);
+        NamingFuzzyWatchContext ctx = org.mockito.Mockito.mock(NamingFuzzyWatchContext.class);
+        when(holder.getFuzzyWatchContext(anyString())).thenReturn(ctx);
+        Field f = NacosNamingService.class.getDeclaredField("namingFuzzyWatchServiceListHolder");
+        f.setAccessible(true);
+        f.set(client, holder);
+        FuzzyWatchEventWatcher watcher =
+            org.mockito.Mockito.mock(FuzzyWatchEventWatcher.class);
+        client.cancelFuzzyWatch("group", watcher);
+        verify(ctx).removeWatcher(watcher);
+    }
+    
+    @Test
+    void testCancelFuzzyWatchWithPatterns() throws Exception {
+        NamingFuzzyWatchServiceListHolder holder =
+            org.mockito.Mockito.mock(NamingFuzzyWatchServiceListHolder.class);
+        NamingFuzzyWatchContext ctx = org.mockito.Mockito.mock(NamingFuzzyWatchContext.class);
+        when(holder.getFuzzyWatchContext(anyString())).thenReturn(ctx);
+        Field f = NacosNamingService.class.getDeclaredField("namingFuzzyWatchServiceListHolder");
+        f.setAccessible(true);
+        f.set(client, holder);
+        FuzzyWatchEventWatcher watcher =
+            org.mockito.Mockito.mock(FuzzyWatchEventWatcher.class);
+        client.cancelFuzzyWatch("svc-*", "grp-*", watcher);
+        verify(ctx).removeWatcher(watcher);
+    }
+    
+    @Test
+    void testCancelFuzzyWatchNullWatcherNoOp() throws Exception {
+        client.cancelFuzzyWatch("group", null);
+        // No exception, no interaction expected
+    }
+    
+    @Test
+    void testCancelFuzzyWatchNoContextNoOp() throws Exception {
+        NamingFuzzyWatchServiceListHolder holder =
+            org.mockito.Mockito.mock(NamingFuzzyWatchServiceListHolder.class);
+        when(holder.getFuzzyWatchContext(anyString())).thenReturn(null);
+        Field f = NacosNamingService.class.getDeclaredField("namingFuzzyWatchServiceListHolder");
+        f.setAccessible(true);
+        f.set(client, holder);
+        FuzzyWatchEventWatcher watcher =
+            org.mockito.Mockito.mock(FuzzyWatchEventWatcher.class);
+        client.cancelFuzzyWatch("group", watcher);
+        // No NPE on null context
     }
 }

@@ -16,8 +16,8 @@
 
 package com.alibaba.nacos.naming.core.v2.metadata;
 
+import com.alibaba.nacos.api.selector.Selector;
 import com.alibaba.nacos.naming.selector.NoneSelector;
-import com.alibaba.nacos.naming.selector.Selector;
 
 import java.io.Serializable;
 import java.util.Map;
@@ -44,7 +44,7 @@ public class ServiceMetadata implements Serializable {
     private float protectThreshold = 0.0F;
     
     /**
-     * Type of {@link com.alibaba.nacos.naming.selector.Selector}.
+     * Type of {@link Selector}.
      */
     private Selector selector = new NoneSelector();
     
@@ -101,8 +101,10 @@ public class ServiceMetadata implements Serializable {
             return false;
         }
         ServiceMetadata metadata = (ServiceMetadata) o;
-        return Float.compare(metadata.protectThreshold, protectThreshold) == 0 && selector == metadata.selector
-                && Objects.equals(extendData, metadata.extendData) && Objects.equals(clusters, metadata.clusters);
+        return Float.compare(metadata.protectThreshold, protectThreshold) == 0
+            && selector == metadata.selector
+            && Objects.equals(extendData, metadata.extendData)
+            && Objects.equals(clusters, metadata.clusters);
     }
     
     @Override

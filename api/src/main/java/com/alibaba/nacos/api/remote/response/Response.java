@@ -16,14 +16,15 @@
 
 package com.alibaba.nacos.api.remote.response;
 
+import com.alibaba.nacos.api.remote.Payload;
+
 /**
  * abstract response model via rpc channel.
  *
  * @author liuzunfei
  * @version $Id: Response.java, v 0.1 2020年07月13日 6:03 PM liuzunfei Exp $
  */
-@SuppressWarnings("PMD.AbstractClassShouldStartWithAbstractNamingRule")
-public abstract class Response {
+public abstract class Response implements Payload {
     
     int resultCode = ResponseCode.SUCCESS.getCode();
     
@@ -122,7 +123,8 @@ public abstract class Response {
     
     @Override
     public String toString() {
-        return "Response{" + "resultCode=" + resultCode + ", errorCode=" + errorCode + ", message='" + message + '\''
-                + ", requestId='" + requestId + '\'' + '}';
+        return "Response{" + "resultCode=" + resultCode + ", errorCode=" + errorCode + ", message='"
+            + message + '\''
+            + ", requestId='" + requestId + '\'' + '}';
     }
 }

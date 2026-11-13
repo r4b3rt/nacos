@@ -48,16 +48,25 @@ public final class TaskExecuteWorker implements NacosTaskProcessor, Closeable {
     
     private final AtomicBoolean closed;
     
+    private final InnerWorker realWorker;
+    
     public TaskExecuteWorker(final String name, final int mod, final int total) {
         this(name, mod, total, null);
     }
     
-    public TaskExecuteWorker(final String name, final int mod, final int total, final Logger logger) {
+    public TaskExecuteWorker(final String name, final int mod, final int total,
+        final Logger logger) {
+        this(name, mod, total, logger, QUEUE_CAPACITY);
+    }
+    
+    TaskExecuteWorker(final String name, final int mod, final int total, final Logger logger,
+        int queueCapacity) {
         this.name = name + "_" + mod + "%" + total;
-        this.queue = new ArrayBlockingQueue<Runnable>(QUEUE_CAPACITY);
+        this.queue = new ArrayBlockingQueue<>(queueCapacity);
         this.closed = new AtomicBoolean(false);
         this.log = null == logger ? LoggerFactory.getLogger(TaskExecuteWorker.class) : logger;
-        new InnerWorker(name).start();
+        realWorker = new InnerWorker(this.name);
+        realWorker.start();
     }
     
     public String getName() {
@@ -70,6 +79,21 @@ public final class TaskExecuteWorker implements NacosTaskProcessor, Closeable {
             putTask((Runnable) task);
         }
         return true;
+    }
+    
+    /**
+     * Try to enqueue one execute task without blocking the producer.
+     *
+     * <p>This is an opt-in admission path for callers that can preserve their own dirty state and
+     * retry later. The existing {@link #process(NacosTask)} contract remains blocking and is not
+     * changed.</p>
+     *
+     * @param task execute task
+     * @return {@code true} when accepted, otherwise {@code false}
+     */
+    public boolean tryProcess(NacosTask task) {
+        return !closed.get() && task instanceof AbstractExecuteTask
+            && queue.offer((Runnable) task);
     }
     
     private void putTask(Runnable task) {
@@ -88,13 +112,14 @@ public final class TaskExecuteWorker implements NacosTaskProcessor, Closeable {
      * Worker status.
      */
     public String status() {
-        return name + ", pending tasks: " + pendingTaskCount();
+        return getName() + ", pending tasks: " + pendingTaskCount();
     }
     
     @Override
     public void shutdown() throws NacosException {
         queue.clear();
         closed.compareAndSet(false, true);
+        realWorker.interrupt();
     }
     
     /**
@@ -118,8 +143,10 @@ public final class TaskExecuteWorker implements NacosTaskProcessor, Closeable {
                     if (duration > 1000L) {
                         log.warn("task {} takes {}ms", task, duration);
                     }
+                } catch (InterruptedException e) {
+                    // [issue #13752] ignore stack log
                 } catch (Throwable e) {
-                    log.error("[TASK-FAILED] " + e.toString(), e);
+                    log.error("[TASK-FAILED] " + e, e);
                 }
             }
         }

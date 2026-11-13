@@ -16,7 +16,6 @@
 
 package com.alibaba.nacos.naming.core.v2.client.impl;
 
-import com.alibaba.nacos.api.common.Constants;
 import com.alibaba.nacos.naming.core.v2.client.AbstractClient;
 import com.alibaba.nacos.naming.core.v2.pojo.HealthCheckInstancePublishInfo;
 import com.alibaba.nacos.naming.core.v2.pojo.InstancePublishInfo;
@@ -24,6 +23,7 @@ import com.alibaba.nacos.naming.core.v2.pojo.Service;
 import com.alibaba.nacos.naming.healthcheck.HealthCheckReactor;
 import com.alibaba.nacos.naming.healthcheck.heartbeat.ClientBeatCheckTaskV2;
 import com.alibaba.nacos.naming.healthcheck.v2.HealthCheckTaskV2;
+import com.alibaba.nacos.naming.misc.ClientConfig;
 import com.alibaba.nacos.naming.monitor.MetricsMonitor;
 
 import java.util.Collection;
@@ -51,16 +51,14 @@ public class IpPortBasedClient extends AbstractClient {
     private HealthCheckTaskV2 healthCheckTaskV2;
     
     public IpPortBasedClient(String clientId, boolean ephemeral) {
+        this(clientId, ephemeral, null);
+    }
+    
+    public IpPortBasedClient(String clientId, boolean ephemeral, Long revision) {
+        super(revision);
         this.ephemeral = ephemeral;
         this.clientId = clientId;
         this.responsibleId = getResponsibleTagFromId();
-        if (ephemeral) {
-            beatCheckTask = new ClientBeatCheckTaskV2(this);
-            HealthCheckReactor.scheduleCheck(beatCheckTask);
-        } else {
-            healthCheckTaskV2 = new HealthCheckTaskV2(this);
-            HealthCheckReactor.scheduleCheck(healthCheckTaskV2);
-        }
     }
     
     private String getResponsibleTagFromId() {
@@ -94,7 +92,8 @@ public class IpPortBasedClient extends AbstractClient {
     @Override
     public boolean isExpire(long currentTime) {
         return isEphemeral() && getAllPublishedService().isEmpty()
-                && currentTime - getLastUpdatedTime() > Constants.DEFAULT_IP_DELETE_TIMEOUT;
+            && currentTime - getLastUpdatedTime() > ClientConfig
+                .getInstance().getClientExpiredTime();
     }
     
     public Collection<InstancePublishInfo> getAllInstancePublishInfo() {
@@ -111,7 +110,8 @@ public class IpPortBasedClient extends AbstractClient {
         }
     }
     
-    private HealthCheckInstancePublishInfo parseToHealthCheckInstance(InstancePublishInfo instancePublishInfo) {
+    private HealthCheckInstancePublishInfo parseToHealthCheckInstance(
+        InstancePublishInfo instancePublishInfo) {
         HealthCheckInstancePublishInfo result;
         if (instancePublishInfo instanceof HealthCheckInstancePublishInfo) {
             result = (HealthCheckInstancePublishInfo) instancePublishInfo;
@@ -127,6 +127,19 @@ public class IpPortBasedClient extends AbstractClient {
             result.initHealthCheck();
         }
         return result;
+    }
+    
+    /**
+     * Init client.
+     */
+    public void init() {
+        if (ephemeral) {
+            beatCheckTask = new ClientBeatCheckTaskV2(this);
+            HealthCheckReactor.scheduleCheck(beatCheckTask);
+        } else {
+            healthCheckTaskV2 = new HealthCheckTaskV2(this);
+            HealthCheckReactor.scheduleCheck(healthCheckTaskV2);
+        }
     }
     
     /**

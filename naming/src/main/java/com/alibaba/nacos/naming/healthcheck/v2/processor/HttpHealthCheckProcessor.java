@@ -27,15 +27,18 @@ import com.alibaba.nacos.common.model.RestResult;
 import com.alibaba.nacos.naming.core.v2.metadata.ClusterMetadata;
 import com.alibaba.nacos.naming.core.v2.pojo.HealthCheckInstancePublishInfo;
 import com.alibaba.nacos.naming.core.v2.pojo.Service;
+import com.alibaba.nacos.naming.healthcheck.HealthCheckTargetUtil;
 import com.alibaba.nacos.naming.healthcheck.v2.HealthCheckTaskV2;
 import com.alibaba.nacos.naming.misc.HttpClientManager;
 import com.alibaba.nacos.naming.misc.SwitchDomain;
 import com.alibaba.nacos.naming.monitor.MetricsMonitor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.net.ConnectException;
 import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Map;
 
 import static com.alibaba.nacos.naming.misc.Loggers.SRV_LOG;
@@ -52,51 +55,74 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessorV2 {
     
     public static final String TYPE = HealthCheckType.HTTP.name();
     
-    private static final NacosAsyncRestTemplate ASYNC_REST_TEMPLATE = HttpClientManager
-            .getProcessorNacosAsyncRestTemplate();
-    
     private final HealthCheckCommonV2 healthCheckCommon;
     
     private final SwitchDomain switchDomain;
     
-    public HttpHealthCheckProcessor(HealthCheckCommonV2 healthCheckCommon, SwitchDomain switchDomain) {
+    private final NacosAsyncRestTemplate asyncRestTemplate;
+    
+    @Autowired
+    public HttpHealthCheckProcessor(HealthCheckCommonV2 healthCheckCommon,
+        SwitchDomain switchDomain) {
+        this(healthCheckCommon, switchDomain,
+            HttpClientManager.getProcessorNacosAsyncRestTemplate());
+    }
+    
+    HttpHealthCheckProcessor(HealthCheckCommonV2 healthCheckCommon, SwitchDomain switchDomain,
+        NacosAsyncRestTemplate asyncRestTemplate) {
         this.healthCheckCommon = healthCheckCommon;
         this.switchDomain = switchDomain;
+        this.asyncRestTemplate = asyncRestTemplate;
     }
     
     @Override
     public void process(HealthCheckTaskV2 task, Service service, ClusterMetadata metadata) {
         HealthCheckInstancePublishInfo instance = (HealthCheckInstancePublishInfo) task.getClient()
-                .getInstancePublishInfo(service);
+            .getInstancePublishInfo(service);
         if (null == instance) {
+            return;
+        }
+        if (!(metadata.getHealthChecker() instanceof Http)) {
+            return;
+        }
+        Http healthChecker = (Http) metadata.getHealthChecker();
+        if (!HealthCheckTargetUtil.isValidHttpHealthChecker(healthChecker)) {
+            return;
+        }
+        int ckPort = metadata.isUseInstancePortForCheck() ? instance.getPort()
+            : metadata.getHealthyCheckPort();
+        URI target;
+        try {
+            target = HealthCheckTargetUtil.buildHttpTarget(instance.getIp(), ckPort,
+                healthChecker.getPath());
+        } catch (URISyntaxException e) {
             return;
         }
         try {
             // TODO handle marked(white list) logic like v1.x.
             if (!instance.tryStartCheck()) {
-                SRV_LOG.warn("http check started before last one finished, service: {} : {} : {}:{}",
-                        service.getGroupedServiceName(), instance.getCluster(), instance.getIp(), instance.getPort());
+                SRV_LOG.warn(
+                    "http check started before last one finished, service: {} : {} : {}:{}",
+                    service.getGroupedServiceName(), instance.getCluster(), instance.getIp(),
+                    instance.getPort());
                 healthCheckCommon
-                        .reEvaluateCheckRT(task.getCheckRtNormalized() * 2, task, switchDomain.getHttpHealthParams());
+                    .reEvaluateCheckRt(task.getCheckRtNormalized() * 2, task,
+                        switchDomain.getHttpHealthParams());
                 return;
             }
             
-            Http healthChecker = (Http) metadata.getHealthChecker();
-            int ckPort = metadata.isUseInstancePortForCheck() ? instance.getPort() : metadata.getHealthyCheckPort();
-            URL host = new URL("http://" + instance.getIp() + ":" + ckPort);
-            URL target = new URL(host, healthChecker.getPath());
             Map<String, String> customHeaders = healthChecker.getCustomHeaders();
             Header header = Header.newInstance();
             header.addAll(customHeaders);
             
-            ASYNC_REST_TEMPLATE.get(target.toString(), header, Query.EMPTY, String.class,
-                    new HttpHealthCheckCallback(instance, task, service));
+            asyncRestTemplate.get(target.toString(), header, Query.EMPTY, String.class,
+                new HttpHealthCheckCallback(instance, task, service));
             MetricsMonitor.getHttpHealthCheckMonitor().incrementAndGet();
         } catch (Throwable e) {
             instance.setCheckRt(switchDomain.getHttpHealthParams().getMax());
             healthCheckCommon.checkFail(task, service, "http:error:" + e.getMessage());
-            healthCheckCommon.reEvaluateCheckRT(switchDomain.getHttpHealthParams().getMax(), task,
-                    switchDomain.getHttpHealthParams());
+            healthCheckCommon.reEvaluateCheckRt(switchDomain.getHttpHealthParams().getMax(), task,
+                switchDomain.getHttpHealthParams());
         }
     }
     
@@ -115,8 +141,9 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessorV2 {
         
         private long startTime = System.currentTimeMillis();
         
-        public HttpHealthCheckCallback(HealthCheckInstancePublishInfo instance, HealthCheckTaskV2 task,
-                Service service) {
+        public HttpHealthCheckCallback(HealthCheckInstancePublishInfo instance,
+            HealthCheckTaskV2 task,
+            Service service) {
             this.instance = instance;
             this.task = task;
             this.service = service;
@@ -128,19 +155,21 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessorV2 {
             int httpCode = result.getCode();
             if (HttpURLConnection.HTTP_OK == httpCode) {
                 healthCheckCommon.checkOk(task, service, "http:" + httpCode);
-                healthCheckCommon.reEvaluateCheckRT(System.currentTimeMillis() - startTime, task,
-                        switchDomain.getHttpHealthParams());
+                healthCheckCommon.reEvaluateCheckRt(System.currentTimeMillis() - startTime, task,
+                    switchDomain.getHttpHealthParams());
             } else if (HttpURLConnection.HTTP_UNAVAILABLE == httpCode
-                    || HttpURLConnection.HTTP_MOVED_TEMP == httpCode) {
+                || HttpURLConnection.HTTP_MOVED_TEMP == httpCode) {
                 // server is busy, need verification later
                 healthCheckCommon.checkFail(task, service, "http:" + httpCode);
                 healthCheckCommon
-                        .reEvaluateCheckRT(task.getCheckRtNormalized() * 2, task, switchDomain.getHttpHealthParams());
+                    .reEvaluateCheckRt(task.getCheckRtNormalized() * 2, task,
+                        switchDomain.getHttpHealthParams());
             } else {
                 //probably means the state files has been removed by administrator
                 healthCheckCommon.checkFailNow(task, service, "http:" + httpCode);
-                healthCheckCommon.reEvaluateCheckRT(switchDomain.getHttpHealthParams().getMax(), task,
-                        switchDomain.getHttpHealthParams());
+                healthCheckCommon.reEvaluateCheckRt(switchDomain.getHttpHealthParams().getMax(),
+                    task,
+                    switchDomain.getHttpHealthParams());
             }
         }
         
@@ -149,11 +178,11 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessorV2 {
             Throwable cause = throwable;
             instance.setCheckRt(System.currentTimeMillis() - startTime);
             int maxStackDepth = 50;
-            for (int deepth = 0; deepth < maxStackDepth && cause != null; deepth++) {
+            for (int depth = 0; depth < maxStackDepth && cause != null; depth++) {
                 if (HttpUtils.isTimeoutException(cause)) {
                     healthCheckCommon.checkFail(task, service, "http:" + cause.getMessage());
-                    healthCheckCommon.reEvaluateCheckRT(task.getCheckRtNormalized() * 2, task,
-                            switchDomain.getHttpHealthParams());
+                    healthCheckCommon.reEvaluateCheckRt(task.getCheckRtNormalized() * 2, task,
+                        switchDomain.getHttpHealthParams());
                     return;
                 }
                 cause = cause.getCause();
@@ -161,17 +190,18 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessorV2 {
             
             // connection error, probably not reachable
             if (throwable instanceof ConnectException) {
-                healthCheckCommon.checkFailNow(task, service, "http:unable2connect:" + throwable.getMessage());
+                healthCheckCommon.checkFailNow(task, service,
+                    "http:unable2connect:" + throwable.getMessage());
             } else {
                 healthCheckCommon.checkFail(task, service, "http:error:" + throwable.getMessage());
             }
-            healthCheckCommon.reEvaluateCheckRT(switchDomain.getHttpHealthParams().getMax(), task,
-                    switchDomain.getHttpHealthParams());
+            healthCheckCommon.reEvaluateCheckRt(switchDomain.getHttpHealthParams().getMax(), task,
+                switchDomain.getHttpHealthParams());
         }
         
         @Override
         public void onCancel() {
-        
+            
         }
     }
 }

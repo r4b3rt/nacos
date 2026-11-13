@@ -19,6 +19,7 @@ package com.alibaba.nacos.naming.healthcheck.heartbeat;
 import com.alibaba.nacos.api.common.Constants;
 import com.alibaba.nacos.api.naming.PreservedMetadataKeys;
 import com.alibaba.nacos.common.notify.NotifyCenter;
+import com.alibaba.nacos.common.trace.event.naming.HealthStateChangeTraceEvent;
 import com.alibaba.nacos.common.utils.ConvertUtils;
 import com.alibaba.nacos.naming.core.v2.client.Client;
 import com.alibaba.nacos.naming.core.v2.event.client.ClientEvent;
@@ -58,24 +59,35 @@ public class UnhealthyInstanceChecker implements InstanceBeatChecker {
     private long getTimeout(Service service, InstancePublishInfo instance) {
         Optional<Object> timeout = getTimeoutFromMetadata(service, instance);
         if (!timeout.isPresent()) {
-            timeout = Optional.ofNullable(instance.getExtendDatum().get(PreservedMetadataKeys.HEART_BEAT_TIMEOUT));
+            timeout = Optional.ofNullable(
+                instance.getExtendDatum().get(PreservedMetadataKeys.HEART_BEAT_TIMEOUT));
         }
         return timeout.map(ConvertUtils::toLong).orElse(Constants.DEFAULT_HEART_BEAT_TIMEOUT);
     }
     
     private Optional<Object> getTimeoutFromMetadata(Service service, InstancePublishInfo instance) {
-        Optional<InstanceMetadata> instanceMetadata = ApplicationUtils.getBean(NamingMetadataManager.class)
+        Optional<InstanceMetadata> instanceMetadata =
+            ApplicationUtils.getBean(NamingMetadataManager.class)
                 .getInstanceMetadata(service, instance.getMetadataId());
-        return instanceMetadata.map(metadata -> metadata.getExtendData().get(PreservedMetadataKeys.HEART_BEAT_TIMEOUT));
+        return instanceMetadata.map(
+            metadata -> metadata.getExtendData().get(PreservedMetadataKeys.HEART_BEAT_TIMEOUT));
     }
     
-    private void changeHealthyStatus(Client client, Service service, HealthCheckInstancePublishInfo instance) {
+    private void changeHealthyStatus(Client client, Service service,
+        HealthCheckInstancePublishInfo instance) {
         instance.setHealthy(false);
         Loggers.EVT_LOG
-                .info("{POS} {IP-DISABLED} valid: {}:{}@{}@{}, region: {}, msg: client last beat: {}", instance.getIp(),
-                        instance.getPort(), instance.getCluster(), service.getName(), UtilsAndCommons.LOCALHOST_SITE,
-                        instance.getLastHeartBeatTime());
-        NotifyCenter.publishEvent(new ServiceEvent.ServiceChangedEvent(service));
+            .info("{POS} {IP-DISABLED} valid: {}:{}@{}@{}, region: {}, msg: client last beat: {}",
+                instance.getIp(),
+                instance.getPort(), instance.getCluster(), service.getName(),
+                UtilsAndCommons.LOCALHOST_SITE,
+                instance.getLastHeartBeatTime());
+        NotifyCenter.publishEvent(
+            new ServiceEvent.ServiceChangedEvent(service, Constants.ServiceChangedType.HEART_BEAT));
         NotifyCenter.publishEvent(new ClientEvent.ClientChangedEvent(client));
+        NotifyCenter.publishEvent(new HealthStateChangeTraceEvent(System.currentTimeMillis(),
+            service.getNamespace(), service.getGroup(), service.getName(), instance.getIp(),
+            instance.getPort(),
+            false, "client_beat"));
     }
 }

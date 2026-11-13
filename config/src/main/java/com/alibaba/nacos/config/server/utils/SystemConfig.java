@@ -17,7 +17,7 @@
 package com.alibaba.nacos.config.server.utils;
 
 import com.alibaba.nacos.common.utils.InternetAddressUtil;
-import org.apache.commons.lang3.StringUtils;
+import com.alibaba.nacos.common.utils.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,7 +41,7 @@ public class SystemConfig {
         if (StringUtils.isNotEmpty(address)) {
             return address;
         } else {
-            address = InternetAddressUtil.localHostIP();
+            address = InternetAddressUtil.localHostIp();
         }
         try {
             Enumeration<NetworkInterface> en = NetworkInterface.getNetworkInterfaces();
@@ -52,7 +52,7 @@ public class SystemConfig {
                     InetAddress ip = ads.nextElement();
                     // Compatible group does not regulate 11 network segments
                     if (!ip.isLoopbackAddress() && ip.getHostAddress().indexOf(":") == -1
-                        /* && ip.isSiteLocalAddress() */) {
+                    /* && ip.isSiteLocalAddress() */) {
                         return ip.getHostAddress();
                     }
                 }

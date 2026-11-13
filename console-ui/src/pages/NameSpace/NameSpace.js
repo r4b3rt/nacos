@@ -16,13 +16,14 @@
 
 import React from 'react';
 import PropTypes from 'prop-types';
-import { Button, ConfigProvider, Dialog, Loading, Table } from '@alifd/next';
+import { Button, ConfigProvider, Dialog, Loading, Table, Form } from '@alifd/next';
 import RegionGroup from '../../components/RegionGroup';
 import NewNameSpace from '../../components/NewNameSpace';
 import EditorNameSpace from '../../components/EditorNameSpace';
 import { getParams, setParams, request } from '../../globalLib';
 
 import './index.scss';
+import PageTitle from '../../components/PageTitle';
 
 @ConfigProvider.config
 class NameSpace extends React.Component {
@@ -39,6 +40,7 @@ class NameSpace extends React.Component {
     this.state = {
       loading: false,
       defaultNamespace: '',
+      defaultNamespaceName: 'public',
       dataSource: [],
     };
   }
@@ -55,9 +57,9 @@ class NameSpace extends React.Component {
     request({
       type: 'get',
       beforeSend() {},
-      url: 'v1/console/namespaces',
+      url: 'v3/console/core/namespace/list',
       success: res => {
-        if (res.code === 200) {
+        if (res.code === 0) {
           const data = res.data || [];
           window.namespaceList = data;
 
@@ -111,11 +113,12 @@ class NameSpace extends React.Component {
     const { namespaceDetails, namespaceName, namespaceID, configuration, description } = locale;
     const { namespace } = record; // 获取ak,sk
     request({
-      url: `v1/console/namespaces?show=all&namespaceId=${namespace}`,
+      url: `v3/console/core/namespace?namespaceId=${namespace}`,
       beforeSend: () => {
         this.openLoading();
       },
       success: res => {
+        res = res.data;
         if (res !== null) {
           Dialog.alert({
             style: { width: '500px' },
@@ -125,21 +128,21 @@ class NameSpace extends React.Component {
               <div>
                 <div style={{ marginTop: '10px' }}>
                   <p>
-                    <span style={{ color: '#999', marginRight: 5 }}>{`${namespaceName}:`}</span>
+                    <span style={{ color: '#999', marginRight: 5 }}>{`${namespaceName}`}</span>
                     <span style={{ color: '#c7254e' }}>{res.namespaceShowName}</span>
                   </p>
                   <p>
-                    <span style={{ color: '#999', marginRight: 5 }}>{`${namespaceID}:`}</span>
+                    <span style={{ color: '#999', marginRight: 5 }}>{`${namespaceID}`}</span>
                     <span style={{ color: '#c7254e' }}>{res.namespace}</span>
                   </p>
                   <p>
-                    <span style={{ color: '#999', marginRight: 5 }}>{`${configuration}:`}</span>
+                    <span style={{ color: '#999', marginRight: 5 }}>{`${configuration}`}</span>
                     <span style={{ color: '#c7254e' }}>
                       {res.configCount} / {res.quota}
                     </span>
                   </p>
                   <p>
-                    <span style={{ color: '#999', marginRight: 5 }}>{`${description}:`}</span>
+                    <span style={{ color: '#999', marginRight: 5 }}>{`${description}`}</span>
                     <span style={{ color: '#c7254e' }}>{res.namespaceDesc}</span>
                   </p>
                 </div>
@@ -162,8 +165,6 @@ class NameSpace extends React.Component {
       namespaceName,
       namespaceID,
       configurationManagement,
-      removeSuccess,
-      deletedSuccessfully,
       deletedFailure,
     } = locale;
     Dialog.confirm({
@@ -172,31 +173,34 @@ class NameSpace extends React.Component {
         <div style={{ marginTop: '-20px' }}>
           <h3>{confirmDelete}</h3>
           <p>
-            <span style={{ color: '#999', marginRight: 5 }}>{`${namespaceName}:`}</span>
+            <span style={{ color: '#999', marginRight: 5 }}>{`${namespaceName}`}</span>
             <span style={{ color: '#c7254e' }}>{record.namespaceShowName}</span>
           </p>
           <p>
-            <span style={{ color: '#999', marginRight: 5 }}>{`${namespaceID}:`}</span>
+            <span style={{ color: '#999', marginRight: 5 }}>{`${namespaceID}`}</span>
             <span style={{ color: '#c7254e' }}>{record.namespace}</span>
           </p>
         </div>
       ),
       onOk: () => {
-        const url = `v1/console/namespaces?namespaceId=${record.namespace}`;
+        const url = `v3/console/core/namespace?namespaceId=${record.namespace}`;
         request({
           url,
           type: 'delete',
           success: res => {
+            res = res.data;
             const _payload = {};
             _payload.title = configurationManagement;
             if (res === true) {
               const urlnamespace = getParams('namespace');
               if (record.namespace === urlnamespace) {
                 setParams('namespace', this.state.defaultNamespace);
+                setParams('namespaceShowName', this.state.defaultNamespaceName);
+                window.nownamespace = this.state.defaultNamespace;
+                window.namespaceShowName = this.state.defaultNamespaceName;
               }
-              Dialog.confirm({ content: removeSuccess, title: deletedSuccessfully });
             } else {
-              Dialog.confirm({ content: res.message, title: deletedFailure });
+              Dialog.alert({ content: res.message, title: deletedFailure });
             }
             this.getNameSpaces();
           },
@@ -208,9 +212,9 @@ class NameSpace extends React.Component {
   refreshNameSpace() {
     request({
       type: 'get',
-      url: 'v1/console/namespaces',
+      url: 'v3/console/core/namespace/list',
       success: res => {
-        if (res.code === 200) {
+        if (res.code === 0) {
           window.namespaceList = res.data;
         }
       },
@@ -238,9 +242,9 @@ class NameSpace extends React.Component {
         {namespaceDelete}
       </a>
     );
-    if (record.type === 1 || record.type === 0) {
+    if (record.type === 0) {
       _delinfo = (
-        <span style={{ marginRight: 10, cursor: 'not-allowed' }} disabled>
+        <span style={{ marginRight: 10, cursor: 'not-allowed', color: '#999' }} disabled>
           {namespaceDelete}
         </span>
       );
@@ -252,9 +256,9 @@ class NameSpace extends React.Component {
     );
 
     let _editinfo = <a onClick={this.openToEdit.bind(this, record)}>{edit}</a>;
-    if (record.type === 0 || record.type === 1) {
+    if (record.type === 0) {
       _editinfo = (
-        <span style={{ marginRight: 10, cursor: 'not-allowed' }} disabled>
+        <span style={{ marginRight: 10, cursor: 'not-allowed', color: '#999' }} disabled>
           {edit}
         </span>
       );
@@ -289,13 +293,14 @@ class NameSpace extends React.Component {
       namespace,
       namespaceAdd,
       namespaceNames,
+      description,
       namespaceNumber,
       configuration,
       namespaceOperation,
     } = locale;
     return (
       <>
-        <RegionGroup left={namespace} />
+        <PageTitle title={namespace} />
         <div className="fusion-demo">
           <Loading
             shape="flower"
@@ -304,23 +309,29 @@ class NameSpace extends React.Component {
             style={{ width: '100%' }}
             visible={this.state.loading}
           >
+            <div
+              style={{
+                position: 'relative',
+                marginTop: 10,
+                height: 'auto',
+                overflow: 'visible',
+              }}
+            >
+              <Form inline>
+                <Form.Item>
+                  <Button type="primary" onClick={this.addNameSpace.bind(this)}>
+                    {namespaceAdd}
+                  </Button>
+                </Form.Item>
+                <Form.Item>
+                  <Button type="secondary" onClick={() => this.getNameSpaces()}>
+                    {locale.refresh}
+                  </Button>
+                </Form.Item>
+              </Form>
+            </div>
+
             <div>
-              <div style={{ textAlign: 'right', marginBottom: 10 }}>
-                <Button
-                  type="primary"
-                  style={{ marginRight: 20, marginTop: 10 }}
-                  onClick={this.addNameSpace.bind(this)}
-                >
-                  {namespaceAdd}
-                </Button>
-                <Button
-                  style={{ marginRight: 0, marginTop: 10 }}
-                  type="secondary"
-                  onClick={() => this.getNameSpaces()}
-                >
-                  {locale.refresh}
-                </Button>
-              </div>
               <div>
                 <Table dataSource={this.state.dataSource} locale={{ empty: pubNoData }}>
                   <Table.Column
@@ -329,6 +340,7 @@ class NameSpace extends React.Component {
                     cell={this.renderName.bind(this)}
                   />
                   <Table.Column title={namespaceNumber} dataIndex="namespace" />
+                  <Table.Column title={description} dataIndex="namespaceDesc" />
                   <Table.Column title={configuration} dataIndex="configCount" />
                   <Table.Column
                     title={namespaceOperation}

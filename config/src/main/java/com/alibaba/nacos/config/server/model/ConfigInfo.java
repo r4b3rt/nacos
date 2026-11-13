@@ -16,6 +16,8 @@
 
 package com.alibaba.nacos.config.server.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 /**
  * ConfigInfo.
  *
@@ -24,13 +26,23 @@ package com.alibaba.nacos.config.server.model;
  */
 public class ConfigInfo extends ConfigInfoBase {
     
-    static final long serialVersionUID = -1L;
+    static final long serialVersionUID = 3115358782431229202L;
+    
+    /** Message carried to the history writer; never stored as configuration metadata. */
+    @JsonIgnore
+    private transient String changeMessage;
     
     private String tenant;
     
     private String appName;
     
     private String type;
+    
+    private String desc;
+    
+    private String configTags;
+    
+    private Long gmtModified;
     
     public ConfigInfo() {
     }
@@ -48,6 +60,24 @@ public class ConfigInfo extends ConfigInfoBase {
         super(dataId, group, content);
         this.tenant = tenant;
         this.appName = appName;
+    }
+    
+    /**
+     * Return the optional message for this publish operation.
+     *
+     * @return change message
+     */
+    public String getChangeMessage() {
+        return changeMessage;
+    }
+    
+    /**
+     * Set the optional message for this publish operation.
+     *
+     * @param changeMessage change message
+     */
+    public void setChangeMessage(String changeMessage) {
+        this.changeMessage = changeMessage;
     }
     
     public String getTenant() {
@@ -74,6 +104,30 @@ public class ConfigInfo extends ConfigInfoBase {
         this.type = type;
     }
     
+    public String getDesc() {
+        return desc;
+    }
+    
+    public void setDesc(String desc) {
+        this.desc = desc;
+    }
+    
+    public String getConfigTags() {
+        return configTags;
+    }
+    
+    public void setConfigTags(String configTags) {
+        this.configTags = configTags;
+    }
+    
+    public Long getGmtModified() {
+        return gmtModified;
+    }
+    
+    public void setGmtModified(Long gmtModified) {
+        this.gmtModified = gmtModified;
+    }
+    
     @Override
     public int hashCode() {
         return super.hashCode();
@@ -86,9 +140,12 @@ public class ConfigInfo extends ConfigInfoBase {
     
     @Override
     public String toString() {
-        return "ConfigInfo{" + "id=" + getId() + ", dataId='" + getDataId() + '\'' + ", group='" + getGroup() + '\''
-                + ", tenant='" + tenant + '\'' + ", appName='" + appName + '\'' + ", content='" + getContent() + '\''
-                + ", md5='" + getMd5() + '\'' + '}';
+        return "ConfigInfo{" + "id=" + getId() + ", dataId='" + getDataId() + '\'' + ", group='"
+            + getGroup() + '\''
+            + ", tenant='" + tenant + '\'' + ", appName='" + appName + '\'' + ", content='"
+            + getContent() + '\''
+            + ", md5='" + getMd5() + '\'' + ", type='" + type + '\'' + ", desc='" + desc + '\''
+            + ", configTags='" + configTags + '\'' + '}';
     }
     
 }

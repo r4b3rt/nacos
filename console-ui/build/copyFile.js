@@ -19,7 +19,7 @@ const path = require('path');
 // 默认打包存放地址
 const srcDir = path.join(__dirname, '../dist');
 // 打包后文件存放地址
-const destDir = path.join(__dirname, '../../console/src/main/resources/static/');
+const destDir = path.join(__dirname, '../../console/src/main/resources/static/legacy/');
 
 const mkdir = dir => {
     if (!fs.existsSync(dir)) {
@@ -27,7 +27,7 @@ const mkdir = dir => {
     }
   };
 
-const copyList = ['js/main.js', 'css/main.css'];
+const copyList = ['js/main.js', 'css/main.css', 'index.html'];
 
 copyList.forEach(_fileName => {
     const srcFileName = path.join(srcDir, _fileName);
